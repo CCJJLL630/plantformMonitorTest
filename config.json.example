@@ -1,0 +1,61 @@
+{
+    "monitor_interval": 300,
+    "platforms": {
+        "buff": {
+            "enabled": true,
+            "base_url": "https://buff.163.com"
+        },
+        "youpin": {
+            "enabled": true,
+            "base_url": "https://www.youpin898.com",
+            "api_base_url": "https://api.youpin898.com",
+            "goods_list_url": "https://www.youpin898.com/market/goods-list?listType=10&templateId=109545&gameId=730"
+        },
+        "ecosteam": {
+            "enabled": true,
+            "base_url": "https://www.ecosteam.cn",
+            "goods_detail_url": "https://www.ecosteam.cn/goods/730-15231-1-laypagesale-0-1.html"
+        }
+    },
+    "items": [
+        {
+            "name": "AK-47 | 红线 (久经沙场)",
+            "wear_range": {
+                "min": 0.15,
+                "max": 0.38
+            },
+            "target_price": 100.0,
+            "platforms": ["buff", "youpin", "ecosteam"],
+            "buff_goods_id": 968354
+        }
+    ],
+    "notification": {
+        "email": {
+            "enabled": false,
+            "smtp_server": "smtp.example.com",
+            "smtp_port": 587,
+            "sender": "your-email@example.com",
+            "password": "your-password",
+            "receivers": ["receiver@example.com"]
+        },
+        "dingtalk": {
+            "enabled": false,
+            "webhook": "https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN",
+            "secret": "YOUR_SECRET"
+        },
+        "wechat": {
+            "enabled": false,
+            "webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY"
+        }
+    },
+    "database": {
+        "type": "sqlite",
+        "path": "data/price_history.db"
+    },
+    "logging": {
+        "level": "INFO",
+        "file": "logs/monitor.log",
+        "max_bytes": 10485760,
+        "backup_count": 5
+    }
+}
