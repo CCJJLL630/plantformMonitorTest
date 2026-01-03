@@ -10,6 +10,7 @@ import os
 
 from monitors import BuffMonitor, YoupinMonitor, EcosteamMonitor
 from utils import Config, Database, Notifier
+from utils.result_saver import save_monitoring_results
 
 
 class PriceMonitor:
@@ -159,6 +160,12 @@ class PriceMonitor:
         if all_prices:
             self.db.insert_prices_batch(all_prices)
             self.logger.info(f"已保存 {len(all_prices)} 条价格记录")
+            
+            # 保存汇总结果到文件
+            try:
+                save_monitoring_results(all_prices, item_name, wear_min, wear_max)
+            except Exception as e:
+                self.logger.error(f"保存汇总结果失败: {e}")
         
         # 发送低价通知
         if low_price_items:
