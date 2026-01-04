@@ -16,6 +16,7 @@
 ```
 PlantformMonitor/
 ├── main.py                  # 主程序入口
+├── start_monitor.bat        # Windows启动脚本（推荐使用）
 ├── config.json.example      # 配置文件模板
 ├── requirements.txt         # Python依赖包
 ├── README.md               # 项目说明文档
@@ -130,15 +131,29 @@ Copy-Item config.json.example config.json
 
 ### 4. 运行程序
 
+#### 方式1：使用启动脚本（推荐 - Windows）
+
+双击运行 `start_monitor.bat` 文件，程序将在独立窗口中运行。
+
+**优点**：
+- ✅ 避免 PowerShell 后台任务信号干扰
+- ✅ 可以直接看到实时输出
+- ✅ 按 Ctrl+C 可以安全退出
+- ✅ 不会出现意外中断问题
+
+#### 方式2：命令行运行
+
 ```bash
+# 基础运行
 python main.py
-```
 
-Windows + venv：
-
-```powershell
+# Windows + venv
 ./venv/Scripts/python.exe main.py
 ```
+
+**⚠️ 注意**：在 Windows PowerShell 中作为后台任务运行时，可能会因为系统信号触发 KeyboardInterrupt。建议使用启动脚本或前台运行。
+
+#### 方式3：测试运行（单次）
 
 一次性运行一轮（不进入无限循环，便于验证配置是否正确）：
 
@@ -252,18 +267,62 @@ cat logs/monitor.log
 1. **API更新**：各平台的API可能会更新，需要根据实际情况调整监控模块代码
 2. **请求频率**：避免请求过于频繁，建议设置合理的监控间隔（建议不低于300秒）
 3. **数据准确性**：价格数据来源于各平台，请以实际交易页面为准
-4. **Cookie认证**：部分平台可能需要登录才能访问，需要在代码中添加Cookie处理
+4. **Cookie认证**：部分平台可能需要登录才能访问，需要在配置中添加Cookie字段
 5. **反爬虫**：使用时请遵守各平台的服务条款，避免被封禁
+6. **运行方式**：Windows 用户推荐使用 `start_monitor.bat` 启动，避免后台运行信号干扰
 
 ### 悠悠有品（Youpin）说明
 
 - 当前实现为 **直接使用 Selenium** 从网页请求中捕获接口响应（避免 `requests` 直连接口被 403/拦截）。
 - 需要安装 `selenium`，并确保本机已安装 Chrome 且 `chromedriver` 与 Chrome 版本匹配（或已在 PATH 中可用）。
+- **⚠️ Windows 注意**：由于 Selenium 需要较长时间进行页面加载和分页操作，在 PowerShell 后台运行时可能会收到系统信号中断。程序已实现自动重试和信号处理机制。
+- 如遇到频繁中断，请使用 `start_monitor.bat` 前台运行。
 
 ### ECOSteam 说明
 
-- ECOSteam 的“在售列表（含磨损 float）”接口通常需要有效登录态。
-- 若日志出现“用户未登录 / Cookie 可能已过期 / refreshToken 过期”等提示，请更新 `config.json` 中 `platforms.ecosteam.Cookie`（通常包含 `loginToken` / `refreshToken` / `clientId` 等）。
+- ECOSteam 的"在售列表（含磨损 float）"接口通常需要有效登录态。
+- 若日志出现"用户未登录 / Cookie 可能已过期 / refreshToken 过期"等提示，请更新 `config.json` 中 `platforms.ecosteam.Cookie`（通常包含 `loginToken` / `refreshToken` / `clientId` 等）。
+- 即使 API 失败，程序会自动切换到 HTML 解析模式作为备用方案。
+
+## 故障排除
+
+### 程序无法启动
+
+1. 检查 Python 版本：`python --version`（需要 3.7+）
+2. 检查依赖是否安装：`pip list | findstr selenium`
+3. 检查配置文件：确保 `config.json` 存在且格式正确
+4. 查看日志文件：`logs/monitor.log`
+
+### Chrome/Selenium 相关问题
+
+1. **ChromeDriver 版本不匹配**：
+   - 查看 Chrome 版本：chrome://version
+   - 下载对应版本的 ChromeDriver：https://chromedriver.chromium.org/
+   - 将 chromedriver.exe 放在 PATH 路径下
+
+2. **Chrome 无法启动**：
+   - 检查是否有残留进程：`Get-Process chrome`
+   - 清理进程：`Stop-Process -Name chrome -Force`
+   - 重启程序
+
+3. **Selenium 超时**：
+   - 程序已设置45秒页面加载超时和30秒脚本执行超时
+   - 如需调整，修改 `monitors/youpin.py` 中的 `set_page_load_timeout` 和 `set_script_timeout` 参数
+
+### Cookie 过期问题
+
+所有平台的 Cookie 都有有效期，需要定期更新：
+
+1. **获取方法**：浏览器登录 → F12 开发者工具 → Network → 复制 Cookie
+2. **更新位置**：`config.json` 中对应平台的 `Cookie` 字段
+3. **验证**：重新运行程序，查看日志是否仍有认证错误
+
+### 性能优化建议
+
+1. **减少监控商品数量**：过多商品会导致单轮监控时间过长
+2. **调整监控间隔**：根据需要设置合理的 `monitor_interval`（建议300秒以上）
+3. **选择性启用平台**：暂时不需要的平台可设置 `"enabled": false`
+4. **关闭不必要的通知**：减少邮件/钉钉通知频率
 
 ## 开发说明
 
@@ -290,6 +349,15 @@ class NewPlatformMonitor(PlatformMonitor):
 
 ## 常见问题
 
+### Q: 程序在 Youpin 监控时意外停止？
+
+A: 这是 Windows 后台运行时的已知问题，解决方法：
+1. **使用 `start_monitor.bat` 启动**（推荐）：双击运行批处理文件
+2. 在 PowerShell 中前台运行（不要使用后台模式）
+3. 程序已内置自动重试机制（最多10次），可以应对偶发的信号中断
+
+**技术原因**：Windows PowerShell 作为后台任务管理器时，会向 Python 进程发送 SIGBREAK 信号，导致 `time.sleep()` 和 `Event.wait()` 被中断。程序已实现信号处理和自动恢复机制。
+
 ### Q: 为什么没有找到商品？
 
 A: 请检查：
@@ -309,14 +377,25 @@ A: 通常是 Cookie 过期导致：
 ### Q: Selenium 卡住或 Chrome 进程过多？
 
 A: 处理方法：
-1. 手动停止所有 Chrome 进程：`Stop-Process -Name chrome -Force`
+1. 手动停止所有 Chrome 进程：`Stop-Process -Name chrome -Force`（PowerShell）或 `taskkill /F /IM chrome.exe`（CMD）
 2. 程序已内置超时保护（页面加载45秒，脚本执行30秒）
 3. 确保没有其他程序占用 Chrome 浏览器
 4. 如仍有问题，可增大 `youpin.py` 中的 timeout 值
+5. 检查 Chrome 和 ChromeDriver 版本是否匹配
 
 ### Q: 如何停止程序？
 
-A: 在命令行中按 `Ctrl+C` 即可安全停止程序
+A: 
+- **前台运行**：在命令行中按 `Ctrl+C` 即可安全停止
+- **批处理运行**：在窗口中按 `Ctrl+C`，程序会在当前任务完成后退出
+- **强制停止**：关闭命令行窗口或使用任务管理器结束进程
+
+### Q: 收到 "接收到停止信号" 但我没有按 Ctrl+C？
+
+A: 这是 Windows 后台运行的已知问题：
+1. 使用 `start_monitor.bat` 启动程序（推荐）
+2. 程序已实现自动重试机制，会尝试继续运行
+3. 如果频繁出现，建议在前台窗口运行而不是后台任务
 
 ### Q: 数据库文件在哪里？
 

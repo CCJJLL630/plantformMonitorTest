@@ -4,6 +4,7 @@
 """
 import logging
 import time
+import signal
 from typing import List, Dict, Any
 from logging.handlers import RotatingFileHandler
 import os
@@ -11,6 +12,21 @@ import os
 from monitors import BuffMonitor, YoupinMonitor, EcosteamMonitor
 from utils import Config, Database, Notifier
 from utils.result_saver import save_monitoring_results
+
+
+# 全局标志：是否应该退出
+_should_exit = False
+
+def signal_handler(signum, frame):
+    """信号处理器：只在真正需要退出时设置标志"""
+    global _should_exit
+    if _should_exit:
+        # 第二次Ctrl+C，强制退出
+        raise KeyboardInterrupt("强制退出")
+    else:
+        # 第一次信号，设置标志
+        _should_exit = True
+        logging.getLogger('PriceMonitor').info("收到退出信号，将在当前任务完成后退出...")
 
 
 class PriceMonitor:
@@ -135,9 +151,23 @@ class PriceMonitor:
                 continue
             
             try:
-                # 获取价格信息
+                #  获取价格信息
                 monitor = self.monitors[platform]
-                prices = monitor.get_item_price(item_name, wear_min, wear_max, item_config=item_config)
+                
+                # 对于可能被信号中断的操作，进行重试（Windows后台运行时可能会收到误触发的信号）
+                max_retries = 10  # 增加重试次数
+                for retry in range(max_retries):
+                    try:
+                        prices = monitor.get_item_price(item_name, wear_min, wear_max, item_config=item_config)
+                        break  # 成功，跳出重试循环
+                    except KeyboardInterrupt:
+                        if retry < max_retries - 1:
+                            self.logger.warning(f"{platform} 监控被意外中断，重试中... ({retry+1}/{max_retries})")
+                            time.sleep(1)  # 缩短重试间隔
+                        else:
+                            self.logger.error(f"{platform} 监控多次被中断，跳过")
+                            prices = []
+                            break
                 
                 if prices:
                     self.logger.info(f"在 {platform} 找到 {len(prices)} 个匹配商品")
@@ -190,6 +220,13 @@ class PriceMonitor:
     
     def run(self):
         """运行监控"""
+        global _should_exit
+        
+        # 设置信号处理器
+        signal.signal(signal.SIGINT, signal_handler)
+        if hasattr(signal, 'SIGBREAK'):
+            signal.signal(signal.SIGBREAK, signal_handler)  # Windows特有
+        
         self.logger.info("=" * 50)
         self.logger.info("价格监控程序启动")
         self.logger.info("=" * 50)
@@ -205,25 +242,36 @@ class PriceMonitor:
         self.logger.info(f"监控间隔: {interval} 秒")
         
         try:
-            while True:
+            while not _should_exit:
                 self.logger.info("-" * 50)
                 self.logger.info(f"开始新一轮监控 - {time.strftime('%Y-%m-%d %H:%M:%S')}")
                 self.logger.info("-" * 50)
                 
                 # 监控每个商品
                 for item_config in items:
+                    if _should_exit:
+                        break
                     try:
                         self.monitor_item(item_config)
                     except Exception as e:
                         self.logger.error(f"监控商品时出错: {e}", exc_info=True)
                 
+                if _should_exit:
+                    break
+                
                 self.logger.info(f"本轮监控完成，等待 {interval} 秒...")
-                time.sleep(interval)
+                # 分段sleep，以便及时响应退出信号
+                for _ in range(interval):
+                    if _should_exit:
+                        break
+                    time.sleep(1)
         
         except KeyboardInterrupt:
-            self.logger.info("接收到停止信号，程序退出")
+            self.logger.info("接收到强制停止信号，程序退出")
         except Exception as e:
             self.logger.error(f"程序运行异常: {e}", exc_info=True)
+        finally:
+            self.logger.info("程序正常退出")
 
 
 def main():

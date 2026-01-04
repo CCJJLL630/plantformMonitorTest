@@ -5,6 +5,7 @@ import re
 import time
 import json
 import logging
+import threading
 from .base import PlatformMonitor
 
 
@@ -16,6 +17,16 @@ class YoupinMonitor(PlatformMonitor):
         self._driver = None
         self._driver_initialized = False
         self.logger = logging.getLogger('YoupinMonitor')
+        self._shutdown_event = threading.Event()  # 用于健壮的等待
+
+    def _safe_sleep(self, seconds: float):
+        """信号安全的sleep函数，忽略KeyboardInterrupt"""
+        try:
+            self._shutdown_event.wait(timeout=seconds)
+        except KeyboardInterrupt:
+            # 在后台运行时，sleep可能会被误触发的信号中断
+            # 忽略这些中断，继续执行
+            pass
 
     def _normalize_name(self, name: str) -> str:
         # 归一化：去空白与常见分隔符，并去掉磨损括号部分，降低中英文标点差异影响
@@ -96,7 +107,7 @@ class YoupinMonitor(PlatformMonitor):
             cookie_str = self.session.headers.get('Cookie', '')
             if cookie_str:
                 self._driver.get('https://www.youpin898.com')
-                time.sleep(1)
+                self._safe_sleep(1)
                 
                 for item in cookie_str.split(';'):
                     item = item.strip()
@@ -177,16 +188,16 @@ class YoupinMonitor(PlatformMonitor):
             self.logger.info(f"已加载页面（目标第 {page_index} 页）")
             
             # 等待页面初始化
-            time.sleep(6)
+            self._safe_sleep(6)
             
             if page_index > 1:
                 # 先等待分页控件出现
                 self.logger.info(f"等待分页控件加载...")
-                time.sleep(4)
+                self._safe_sleep(4)
                 
                 # 滚动到底部，确保分页控件在视图中
                 self._driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(1)
+                self._safe_sleep(1)
                 
                 # 通过JavaScript点击指定页码（使用正确的class名）
                 self.logger.info(f"尝试翻页到第 {page_index} 页...")
@@ -245,7 +256,7 @@ class YoupinMonitor(PlatformMonitor):
                 # 等待数据加载
                 wait_time = 5 + (page_index - 1) * 3
                 self.logger.info(f"等待 {wait_time} 秒让数据加载...")
-                time.sleep(wait_time)
+                self._safe_sleep(wait_time)
                 
                 # 验证是否真的翻页了（使用新的选择器）
                 current_page_num = self._driver.execute_script("""
@@ -268,13 +279,13 @@ class YoupinMonitor(PlatformMonitor):
                     self.logger.warning(f"页码验证失败！期望第{page_index}页，实际第{current_page_num}页（继续尝试获取数据）")
             else:
                 # 第一页直接等待
-                time.sleep(3)
+                self._safe_sleep(3)
             
             self.logger.info("准备提取性能日志")
 
             
             # 从性能日志中提取 API 响应
-            time.sleep(0.5)  # 减少等待时间
+            self._safe_sleep(0.5)  # 减少等待时间
             logs = self._driver.get_log('performance')
             self.logger.info(f"获取到 {len(logs)} 条性能日志")
             
