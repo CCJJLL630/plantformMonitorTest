@@ -1,4 +1,4 @@
-"""ECOSteam平台监控"""
+"""ECOSteam平台监控（优先使用官方 API SellGoodsQuery）"""
 from typing import Dict, List, Any, Optional
 import re
 import time
@@ -6,7 +6,7 @@ from .base import PlatformMonitor
 
 
 class EcosteamMonitor(PlatformMonitor):
-    """ECOSteam平台监控器（HTML 解析方式）"""
+    """ECOSteam平台监控器（API 优先，HTML 作为备用）"""
 
     def _get_goods_detail_url(self, item_config: Optional[Dict[str, Any]]) -> Optional[str]:
         if item_config:
@@ -75,6 +75,109 @@ class EcosteamMonitor(PlatformMonitor):
 
         return all_rows
 
+    def _parse_goods_url(self, url: str) -> Dict[str, int]:
+        """从 goods URL 中提取 gameId 和 goodsId（ecosteam 内部 ID 不是此 ID，但可用于参考）"""
+        m = re.search(r"/goods/(\d+)-(\d+)-", url)
+        if not m:
+            return {}
+        return {"gameId": int(m.group(1)), "goodsId": int(m.group(2))}
+
+    def _resolve_hash_name(self, goods_url: str, item_config: Optional[Dict[str, Any]]) -> Optional[str]:
+        # 允许在 item_config 中直接提供 hash_name，避免额外请求
+        if item_config:
+            hash_name = item_config.get('eco_hash_name') or item_config.get('ecosteam_hash_name')
+            if hash_name:
+                return str(hash_name)
+
+        try:
+            html = self._make_request(goods_url).text
+            m = re.search(r'data-HashName="([^"]+)"', html)
+            return m.group(1) if m else None
+        except Exception:
+            return None
+
+    def _resolve_internal_id(self, hash_name: str, game_id: int) -> Optional[str]:
+        try:
+            resp = self._make_request(
+                f"{self.base_url.rstrip('/')}/Api/SteamGoods/GoodsDetailQueryPost",
+                method='POST',
+                json={'GameId': game_id, 'HashName': hash_name},
+            ).json()
+            sd = resp.get('StatusData') or {}
+            rd = sd.get('ResultData') or {}
+            internal_id = rd.get('Id') or rd.get('GoodsId') or rd.get('SteamGoodsId')
+            return internal_id
+        except Exception:
+            return None
+
+    def _fetch_sell_list_api(self, hash_name: str, internal_id: Optional[str], game_id: int, page_size: int = 40) -> List[Dict[str, Any]]:
+        """调用 SellGoodsQuery API 分页获取在售列表"""
+        sell_url = f"{self.base_url.rstrip('/')}/Api/SteamGoods/SellGoodsQuery"
+        all_items: List[Dict[str, Any]] = []
+        page_index = 1
+        total_record: Optional[int] = None
+
+        while True:
+            payload = {
+                'GameId': game_id,
+                'HashName': hash_name,
+                'PageIndex': page_index,
+                'PageSize': page_size,
+            }
+            if internal_id:
+                payload['GoodsId'] = internal_id
+
+            resp = self._make_request(sell_url, method='POST', json=payload).json()
+            sd = resp.get('StatusData') or {}
+            rc = str(sd.get('ResultCode'))
+            if rc not in ('0', '200', 'OK', 'SUCCESS'):
+                self.logger.warning(f"SellGoodsQuery 返回错误: code={rc} msg={sd.get('ResultMsg')}")
+                break
+
+            rd = sd.get('ResultData') or {}
+            if total_record is None:
+                total_record = rd.get('TotalRecord')
+
+            items = rd.get('PageResult') or rd.get('List') or rd.get('Items') or []
+            if not items:
+                break
+
+            for it in items:
+                if isinstance(it, dict):
+                    it.setdefault('__pageIndex', page_index)
+            all_items.extend(items)
+
+            if isinstance(total_record, int) and len(all_items) >= total_record:
+                break
+
+            page_index += 1
+            if page_index > 50:
+                break
+            self._sleep(0.5)
+
+        return all_items
+
+    def _parse_wear(self, item: Dict[str, Any]) -> Optional[float]:
+        for key in ('Scale', 'scale', 'Abrade', 'abrade', 'Wear', 'wear'):
+            if key in item:
+                try:
+                    wear = float(item[key])
+                    if wear > 1:
+                        wear = wear / 100.0
+                    return wear
+                except (ValueError, TypeError):
+                    continue
+        return None
+
+    def _parse_price(self, item: Dict[str, Any]) -> Optional[float]:
+        for key in ('SellingPrice', 'sellingPrice', 'BottomPrice', 'Price', 'price'):
+            if key in item:
+                try:
+                    return float(item[key])
+                except (ValueError, TypeError):
+                    continue
+        return None
+
     def get_item_price(
         self,
         item_name: str,
@@ -82,56 +185,91 @@ class EcosteamMonitor(PlatformMonitor):
         wear_max: float,
         item_config: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        获取ECOSteam平台商品价格（使用 HTML 解析）
-        
-        Args:
-            item_name: 商品名称
-            wear_min: 最小磨损
-            wear_max: 最大磨损
-            item_config: 商品配置（需包含 goods_detail_url）
-            
-        Returns:
-            价格信息列表
-        """
-        results = []
+        """获取ECOSteam平台商品价格（API 优先，失败则回退 HTML）"""
+        results: List[Dict[str, Any]] = []
         observed_wears: List[float] = []
-        
+
         try:
             goods_url = self._get_goods_detail_url(item_config)
             if not goods_url:
                 self.logger.error('ECOSteam 缺少 goods_detail_url（商品详情页 URL）')
                 return results
 
-            self.logger.info(f"从 ECOSteam 商品页 HTML 解析在售列表: {goods_url}")
-            
-            # 直接使用 HTML 解析方法
-            for row in self._parse_sell_list_from_html(goods_url):
-                wear_value = float(row.get('wear', 0))
-                price = float(row.get('price', 0))
+            # 准备请求头
+            self.session.headers.setdefault('Origin', self.base_url.rstrip('/'))
+            self.session.headers.setdefault('Referer', goods_url)
+            self.session.headers.setdefault('X-Requested-With', 'XMLHttpRequest')
 
-                if len(observed_wears) < 30:
-                    observed_wears.append(wear_value)
+            # 解析 gameId
+            parsed = self._parse_goods_url(goods_url)
+            game_id = int(item_config.get('eco_game_id') or parsed.get('gameId') or 730)
 
-                if wear_min <= wear_value <= wear_max:
-                    results.append({
-                        'platform': 'ecosteam',
-                        'item_name': item_name,
-                        'price': price,
-                        'wear': wear_value,
-                        'url': goods_url,
-                        'timestamp': int(time.time())
-                    })
-                    self.logger.info(
-                        f"找到匹配商品 - 价格: {price}, 磨损: {wear_value:.6f}"
-                    )
+            # 先尝试 API
+            hash_name = self._resolve_hash_name(goods_url, item_config)
+            internal_id = None
+            if hash_name:
+                internal_id = item_config.get('eco_internal_goods_id') or item_config.get('eco_goods_id')
+                internal_id = str(internal_id) if internal_id else self._resolve_internal_id(hash_name, game_id)
+
+            api_items: List[Dict[str, Any]] = []
+            if hash_name:
+                self.logger.info(f"通过 API 获取 ECOSteam 在售列表: hash_name={hash_name} internal_id={internal_id}")
+                api_items = self._fetch_sell_list_api(hash_name, internal_id, game_id)
+            else:
+                self.logger.warning("未获取到 hash_name，跳过 API，回退 HTML 解析")
+
+            # 如果 API 返回为空，回退到 HTML 解析
+            if not api_items:
+                self.logger.info("API 未返回数据，改用 HTML 解析")
+                for row in self._parse_sell_list_from_html(goods_url):
+                    wear_value = float(row.get('wear', 0))
+                    price = float(row.get('price', 0))
+
+                    if len(observed_wears) < 30:
+                        observed_wears.append(wear_value)
+
+                    if wear_min <= wear_value <= wear_max:
+                        results.append({
+                            'platform': 'ecosteam',
+                            'item_name': item_name,
+                            'price': price,
+                            'wear': wear_value,
+                            'url': goods_url,
+                            'timestamp': int(time.time())
+                        })
+                        self.logger.info(
+                            f"找到匹配商品 - 价格: {price}, 磨损: {wear_value:.6f}"
+                        )
+            else:
+                # 使用 API 数据
+                for item in api_items:
+                    wear_value = self._parse_wear(item)
+                    price = self._parse_price(item)
+                    if wear_value is None or price is None:
+                        continue
+
+                    if len(observed_wears) < 30:
+                        observed_wears.append(wear_value)
+
+                    if wear_min <= wear_value <= wear_max:
+                        results.append({
+                            'platform': 'ecosteam',
+                            'item_name': item_name,
+                            'price': price,
+                            'wear': wear_value,
+                            'url': goods_url,
+                            'timestamp': int(time.time())
+                        })
+                        self.logger.info(
+                            f"找到匹配商品 - 价格: {price}, 磨损: {wear_value:.6f}"
+                        )
 
             if not results and observed_wears:
                 self.logger.info(
                     f"ECOSteam 未命中磨损区间: {wear_min}-{wear_max}；样本磨损范围: {min(observed_wears):.6f}-{max(observed_wears):.6f}"
                 )
-        
+
         except Exception as e:
             self.logger.error(f"获取ECOSteam价格失败: {e}")
-        
+
         return results

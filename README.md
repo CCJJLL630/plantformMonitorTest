@@ -24,8 +24,8 @@ PlantformMonitor/
 │   ├── __init__.py
 │   ├── base.py            # 监控器基类
 │   ├── buff.py            # 网易BUFF监控
-│   ├── youpin.py          # 悠悠有品监控（Selenium）
-│   └── ecosteam.py        # ECOSteam监控（HTML解析兜底）
+│   ├── youpin.py          # 悠悠有品监控（requests API）
+│   └── ecosteam.py        # ECOSteam监控（API优先，HTML兜底）
 ├── utils/                  # 工具模块
 │   ├── __init__.py
 │   ├── config.py          # 配置管理
@@ -91,11 +91,35 @@ Copy-Item config.json.example config.json
         },
         "youpin": {
             "enabled": true,
-            "base_url": "https://www.youpin898.com"
+            "base_url": "https://www.youpin898.com",
+            "api_base_url": "https://api.youpin898.com",
+            "market_api_url": "https://api.youpin898.com/api/homepage/pc/goods/market/queryOnSaleCommodityList",
+            "market_method": "POST",
+            "market_page_delay_seconds": 1.0,
+            "market_request_delay_seconds": 0.25,
+            "market_headers": {
+                "app-version": "5.26.0",
+                "appversion": "5.26.0",
+                "apptype": "1",
+                "platform": "pc",
+                "secret-v": "h5_v1",
+                "deviceid": "<deviceid>",
+                "deviceuk": "<deviceuk>",
+                "uk": "<uk>",
+                "authorization": "<uu_token>",
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...",
+                "referer": "https://www.youpin898.com/",
+                "origin": "https://www.youpin898.com",
+                "accept-language": "zh-CN,zh;q=0.9",
+                "content-type": "application/json"
+            },
+            "Cookie": "uu_token=<uu_token>"
         },
         "ecosteam": {
             "enabled": true,
-            "base_url": "https://www.ecosteam.cn"
+            "base_url": "https://www.ecosteam.cn",
+            "goods_detail_url": "https://www.ecosteam.cn/goods/730-15231-1-laypagesale-0-1.html",
+            "cookie": "SessionID=...; PHPSESSID=..."
         }
     },
     "items": [
@@ -106,13 +130,55 @@ Copy-Item config.json.example config.json
                 "max": 0.38
             },
             "target_price": 100.0,
-            "platforms": ["buff", "youpin", "ecosteam"]
+            "platforms": ["buff", "youpin", "ecosteam"],
+            "buff_goods_id": 968354,
+            "youpin_template_id": 109545,
+            "eco_hash_name": "AK-47 | Redline (Field-Tested)"
         }
     ]
 }
 ```
 
 重要：如需访问需要登录/鉴权的平台接口，通常需要在对应平台配置中加入 `Cookie`（或 `cookie`）字段。该字段通常包含敏感信息，请勿提交到公开仓库。
+
+**YOUPIN 市场接口配置示例（推荐）**：
+```json
+"youpin": {
+    "enabled": true,
+    "base_url": "https://www.youpin898.com",
+    "api_base_url": "https://api.youpin898.com",
+    "market_api_url": "https://api.youpin898.com/api/homepage/pc/goods/market/queryOnSaleCommodityList",
+    "market_method": "POST",
+    "market_page_delay_seconds": 1.0,
+    "market_request_delay_seconds": 0.25,
+    "market_headers": {
+        "app-version": "5.26.0",
+        "appversion": "5.26.0",
+        "apptype": "1",
+        "platform": "pc",
+        "secret-v": "h5_v1",
+        "deviceid": "<deviceid>",
+        "deviceuk": "<deviceuk>",
+        "uk": "<uk>",
+        "authorization": "<uu_token>",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...",
+        "referer": "https://www.youpin898.com/",
+        "origin": "https://www.youpin898.com",
+        "accept-language": "zh-CN,zh;q=0.9",
+        "content-type": "application/json"
+    },
+    "Cookie": "uu_token=<uu_token>"
+}
+```
+
+获取 Youpin 的 `market_headers`：
+1. 浏览器登录并打开首页/商品列表页
+2. F12 → Network，找到 `queryOnSaleCommodityList` 请求
+3. 复制该请求的 Request Headers 中上述字段（`deviceid/deviceuk/uk/authorization/app-version/...`）到 `market_headers`
+
+降低触发频率限制（如 `code=84104`）：
+- 增大 `market_page_delay_seconds`（例如 1.5~2.0）
+- 增大 `market_request_delay_seconds`（例如 0.3~0.6）
 
 **ECOSteam Cookie 配置示例**：
 ```json
@@ -185,9 +251,9 @@ python main.py
 
 - BUFF：`buff_goods_id`（推荐填写，避免依赖搜索接口）
 - 悠悠有品：`youpin_template_id`（或兼容字段 `youpin_goods_id`）
-- ECOSteam：可在 `items` 中配置 `eco_goods_url`/`ecosteam_goods_url` 指向商品详情页（否则使用 `platforms.ecosteam.goods_detail_url`）
+- ECOSteam：`eco_hash_name`（可选）；`eco_goods_url`/`ecosteam_goods_url` 指向商品详情页（否则使用 `platforms.ecosteam.goods_detail_url`）
 
-> 这些字段均为可选，但填写后更容易“精准定位”商品。
+> 这些字段均为可选，但填写后更容易“精准定位”商品，并减少额外请求（如哈希名解析）。
 
 ### 通知配置
 
@@ -273,10 +339,12 @@ cat logs/monitor.log
 
 ### 悠悠有品（Youpin）说明
 
-- 当前实现为 **直接使用 Selenium** 从网页请求中捕获接口响应（避免 `requests` 直连接口被 403/拦截）。
-- 需要安装 `selenium`，并确保本机已安装 Chrome 且 `chromedriver` 与 Chrome 版本匹配（或已在 PATH 中可用）。
-- **⚠️ Windows 注意**：由于 Selenium 需要较长时间进行页面加载和分页操作，在 PowerShell 后台运行时可能会收到系统信号中断。程序已实现自动重试和信号处理机制。
-- 如遇到频繁中断，请使用 `start_monitor.bat` 前台运行。
+- 当前实现为 **requests**，默认不会访问 `inventory/list`（账户库存）。
+- 必须在 `platforms.youpin` 中配置 **`market_api_url`**（完整 URL）或 **`market_api_path`**（与 `api_base_url` 拼接）指向“市场在售列表”接口；默认会尝试 `/api/homepage/pc/goods/market/queryOnSaleCommodityList`。
+- 若配置错误且指向 `inventory/list`，监控会拒绝请求并提示错误。
+- 建议同时配置 `youpin_template_id`（或 `youpin_goods_id`）以精确定位模板。
+- 如果遇到 `403`，通常是缺少风控校验头：请按上面抓包方式补齐 `market_headers`。
+- 如果遇到 `429` 或 `code=84104`（频率限制），请调高 `market_page_delay_seconds` / `market_request_delay_seconds`。
 
 ### ECOSteam 说明
 
@@ -289,25 +357,11 @@ cat logs/monitor.log
 ### 程序无法启动
 
 1. 检查 Python 版本：`python --version`（需要 3.7+）
-2. 检查依赖是否安装：`pip list | findstr selenium`
-3. 检查配置文件：确保 `config.json` 存在且格式正确
-4. 查看日志文件：`logs/monitor.log`
+2. 检查配置文件：确保 `config.json` 存在且格式正确
+3. 查看日志文件：`logs/monitor.log`
 
-### Chrome/Selenium 相关问题
-
-1. **ChromeDriver 版本不匹配**：
-   - 查看 Chrome 版本：chrome://version
-   - 下载对应版本的 ChromeDriver：https://chromedriver.chromium.org/
-   - 将 chromedriver.exe 放在 PATH 路径下
-
-2. **Chrome 无法启动**：
-   - 检查是否有残留进程：`Get-Process chrome`
-   - 清理进程：`Stop-Process -Name chrome -Force`
-   - 重启程序
-
-3. **Selenium 超时**：
-   - 程序已设置45秒页面加载超时和30秒脚本执行超时
-   - 如需调整，修改 `monitors/youpin.py` 中的 `set_page_load_timeout` 和 `set_script_timeout` 参数
+### （已移除）Chrome/Selenium 相关问题
+> 监控逻辑已改为纯 requests，无需 Selenium/ChromeDriver。
 
 ### Cookie 过期问题
 
@@ -351,12 +405,7 @@ class NewPlatformMonitor(PlatformMonitor):
 
 ### Q: 程序在 Youpin 监控时意外停止？
 
-A: 这是 Windows 后台运行时的已知问题，解决方法：
-1. **使用 `start_monitor.bat` 启动**（推荐）：双击运行批处理文件
-2. 在 PowerShell 中前台运行（不要使用后台模式）
-3. 程序已内置自动重试机制（最多10次），可以应对偶发的信号中断
-
-**技术原因**：Windows PowerShell 作为后台任务管理器时，会向 Python 进程发送 SIGBREAK 信号，导致 `time.sleep()` 和 `Event.wait()` 被中断。程序已实现信号处理和自动恢复机制。
+A: 仍建议前台运行或使用 `start_monitor.bat`，避免 Windows 后台任务误发信号。
 
 ### Q: 为什么没有找到商品？
 
@@ -376,12 +425,7 @@ A: 通常是 Cookie 过期导致：
 
 ### Q: Selenium 卡住或 Chrome 进程过多？
 
-A: 处理方法：
-1. 手动停止所有 Chrome 进程：`Stop-Process -Name chrome -Force`（PowerShell）或 `taskkill /F /IM chrome.exe`（CMD）
-2. 程序已内置超时保护（页面加载45秒，脚本执行30秒）
-3. 确保没有其他程序占用 Chrome 浏览器
-4. 如仍有问题，可增大 `youpin.py` 中的 timeout 值
-5. 检查 Chrome 和 ChromeDriver 版本是否匹配
+A: 本项目已移除 Selenium 依赖，无此问题。
 
 ### Q: 如何停止程序？
 

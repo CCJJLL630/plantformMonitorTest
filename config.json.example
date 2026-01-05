@@ -9,13 +9,23 @@
             "enabled": true,
             "base_url": "https://www.youpin898.com",
             "api_base_url": "https://api.youpin898.com",
-            "goods_list_url": "https://www.youpin898.com/market/goods-list?listType=10&templateId=109545&gameId=730"
+            "goods_list_url": "https://www.youpin898.com/market/goods-list?listType=10&templateId=109545&gameId=730",
+            "cookie": "uu_token=YOUR_TOKEN; other=...",  
+            "market_api_url": "https://api.youpin898.com/api/homepage/pc/goods/market/queryOnSaleCommodityList",  
+            "market_api_path": "" ,
+            "market_method": "POST",
+            "market_headers": {},
+            "game_id": 730,
+            "list_type": 10
         },
         "ecosteam": {
             "enabled": true,
             "base_url": "https://www.ecosteam.cn",
-            "goods_detail_url": "https://www.ecosteam.cn/goods/730-15231-1-laypagesale-0-1.html"
+            "goods_detail_url": "https://www.ecosteam.cn/goods/730-15231-1-laypagesale-0-1.html",
+            "cookie": ""  
         }
+            "market_page_delay_seconds": 1.0,
+            "market_request_delay_seconds": 0.25,
     },
     "items": [
         {
@@ -26,7 +36,9 @@
             },
             "target_price": 100.0,
             "platforms": ["buff", "youpin", "ecosteam"],
-            "buff_goods_id": 968354
+            "buff_goods_id": 968354,
+            "youpin_template_id": 109545,
+            "eco_hash_name": "AK-47 | Redline (Field-Tested)"
         }
     ],
     "notification": {

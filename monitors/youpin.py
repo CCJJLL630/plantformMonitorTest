@@ -1,32 +1,23 @@
-"""悠悠有品平台监控"""
-from typing import Dict, List, Any, Optional
+"""悠悠有品平台监控（纯 requests 版）"""
+from typing import Dict, List, Any, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
+import base64
+import json
+import random
 import re
 import time
-import json
 import logging
-import threading
 from .base import PlatformMonitor
 
 
 class YoupinMonitor(PlatformMonitor):
-    """悠悠有品平台监控器"""
+    """悠悠有品平台监控器（通过官方/移动端 API，避免 Selenium）"""
+
+    DEFAULT_MARKET_API_PATH = '/api/homepage/pc/goods/market/queryOnSaleCommodityList'
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self._driver = None
-        self._driver_initialized = False
         self.logger = logging.getLogger('YoupinMonitor')
-        self._shutdown_event = threading.Event()  # 用于健壮的等待
-
-    def _safe_sleep(self, seconds: float):
-        """信号安全的sleep函数，忽略KeyboardInterrupt"""
-        try:
-            self._shutdown_event.wait(timeout=seconds)
-        except KeyboardInterrupt:
-            # 在后台运行时，sleep可能会被误触发的信号中断
-            # 忽略这些中断，继续执行
-            pass
 
     def _normalize_name(self, name: str) -> str:
         # 归一化：去空白与常见分隔符，并去掉磨损括号部分，降低中英文标点差异影响
@@ -58,323 +49,258 @@ class YoupinMonitor(PlatformMonitor):
         }
 
     def _ensure_token_headers(self, referer: Optional[str]):
+        """确保请求头包含必要的 Cookie/Token 与移动端 UA"""
         cookie = self.session.headers.get('Cookie', '')
         m = re.search(r'(?:^|;\s*)uu_token=([^;]+)', cookie)
         if m:
             token = m.group(1)
-            # 这些 header 中不一定都需要，但加上有助于兼容不同鉴权方式
+            # 同时尝试多个头以兼容不同的后端校验
             self.session.headers.setdefault('uu-token', token)
             self.session.headers.setdefault('UU-Token', token)
             self.session.headers.setdefault('token', token)
-            self.session.headers.setdefault('Authorization', f'Bearer {token}')
+            # 抓包显示 PC 端使用的是 raw token（无 Bearer 前缀）
+            self.session.headers.setdefault('authorization', token)
+            self.session.headers.setdefault('Authorization', token)
+
+            # 部分风控会校验 deviceId/version（通常包含在 JWT payload 里）
+            payload = self._try_decode_jwt_payload(token)
+            if payload:
+                device_id = payload.get('deviceId') or payload.get('deviceid')
+                version = payload.get('version')
+                if device_id:
+                    self.session.headers.setdefault('deviceId', str(device_id))
+                    self.session.headers.setdefault('deviceid', str(device_id))
+                    self.session.headers.setdefault('DeviceId', str(device_id))
+                    self.session.headers.setdefault('Device-Id', str(device_id))
+                if version:
+                    self.session.headers.setdefault('version', str(version))
 
         # 使用手机端 User-Agent 以获取精确的价格（含小数）
-        self.session.headers.setdefault('User-Agent', 
-            'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148')
+        self.session.headers.setdefault(
+            'User-Agent',
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148'
+        )
         self.session.headers.setdefault('Origin', 'https://www.youpin898.com')
         if referer:
             self.session.headers.setdefault('Referer', referer)
         self.session.headers.setdefault('Accept', 'application/json, text/plain, */*')
+        self.session.headers.setdefault('Accept-Language', 'zh-CN,zh;q=0.9')
         self.session.headers.setdefault('Content-Type', 'application/json;charset=UTF-8')
-    
-    def _init_selenium(self):
-        """初始化 Selenium WebDriver（延迟加载）"""
-        if self._driver_initialized:
+        self.session.headers.setdefault('X-Requested-With', 'XMLHttpRequest')
+
+    def _try_decode_jwt_payload(self, token: str) -> Optional[Dict[str, Any]]:
+        """尽力解析 uu_token 的 JWT payload（失败返回 None）。"""
+        try:
+            parts = token.split('.')
+            if len(parts) != 3:
+                return None
+            payload_b64 = parts[1]
+            # base64url padding
+            payload_b64 += '=' * (-len(payload_b64) % 4)
+            raw = base64.urlsafe_b64decode(payload_b64.encode('utf-8'))
+            obj = json.loads(raw.decode('utf-8', errors='ignore'))
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+
+    def _log_http_block(self, url: str, resp) -> None:
+        """记录 403/429 等拦截信息，便于对照浏览器抓包。"""
+        try:
+            ct = resp.headers.get('content-type', '')
+            rid = resp.headers.get('x-request-id') or resp.headers.get('X-Request-Id')
+            self.logger.warning(
+                f"Youpin 请求被拦截: status={resp.status_code} content-type={ct} request-id={rid} url={url}"
+            )
+            body = resp.text or ''
+            body = body.strip().replace('\r', ' ').replace('\n', ' ')
+            if body:
+                self.logger.warning(f"响应体片段: {body[:300]}")
+        except Exception:
+            # 日志失败不应影响主流程
             return
-        
-        try:
-            from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
-            
-            chrome_options = Options()
-            chrome_options.add_argument('--headless')  # 无头模式，不显示浏览器窗口
-            chrome_options.add_argument('--disable-gpu')
-            chrome_options.add_argument('--no-sandbox')
-            chrome_options.add_argument('--disable-dev-shm-usage')
-            chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-            chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
-            chrome_options.add_experimental_option('useAutomationExtension', False)
-            chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
-            
-            self.logger.info("正在启动 Chrome WebDriver...")
-            self._driver = webdriver.Chrome(options=chrome_options)
-            # 设置页面加载和脚本执行超时（秒）
-            self._driver.set_page_load_timeout(45)
-            self._driver.set_script_timeout(30)
-            self._driver_initialized = True
-            
-            # 访问主页并注入 Cookie
-            cookie_str = self.session.headers.get('Cookie', '')
-            if cookie_str:
-                self._driver.get('https://www.youpin898.com')
-                self._safe_sleep(1)
-                
-                for item in cookie_str.split(';'):
-                    item = item.strip()
-                    if '=' in item:
-                        name, value = item.split('=', 1)
-                        try:
-                            self._driver.add_cookie({'name': name.strip(), 'value': value.strip()})
-                        except:
-                            pass
-            
-            self.logger.info("Selenium WebDriver 初始化完成")
-        except Exception as e:
-            self.logger.error(f"初始化 Selenium 失败: {e}")
-            self._driver = None
-            self._driver_initialized = True  # 标记为已尝试，避免重复初始化
-    
-    def _extract_cookies_from_selenium(self) -> Dict[str, str]:
-        """从 Selenium 浏览器中提取 Cookie"""
-        if not self._driver:
-            return {}
-        
-        cookies = {}
-        try:
-            for cookie in self._driver.get_cookies():
-                cookies[cookie['name']] = cookie['value']
-        except:
-            pass
-        return cookies
-    
-    def _extract_headers_from_selenium(self) -> Dict[str, str]:
-        """从 Selenium 捕获的请求中提取请求头"""
-        if not self._driver:
-            return {}
-        
-        headers = {}
-        try:
-            logs = self._driver.get_log('performance')
-            for entry in logs:
-                try:
-                    log = json.loads(entry['message'])['message']
-                    method = log.get('method')
-                    
-                    # 找到我们的 API 请求
-                    if method == 'Network.requestWillBeSent':
-                        request_data = log.get('params', {}).get('request', {})
-                        url = request_data.get('url', '')
-                        
-                        if 'queryOnSaleCommodityList' in url:
-                            # 提取这个请求的所有 headers
-                            headers = request_data.get('headers', {})
-                            break
-                except:
-                    continue
-        except:
-            pass
-        
-        return headers
 
-    
-    def _fetch_market_data_selenium(self, template_id: int, page_index: int = 1, page_size: int = 20) -> Optional[Dict]:
-        """使用 Selenium 获取市场在售商品数据（通过性能日志捕获API响应）
-        
-        策略：每次都重新访问页面，通过注入JavaScript直接修改页面状态来请求指定页码的数据
+    def _iter_api_bases(self) -> List[str]:
+        bases = []
+        for key in ('api_base_url', 'base_url'):
+            v = self.config.get(key)
+            if v:
+                bases.append(str(v).rstrip('/'))
+        bases.append('https://api.youpin898.com')
+        return list(dict.fromkeys(bases))  # 去重保持顺序
+
+    def _extract_items(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """从响应 JSON 中提取商品列表"""
+        # 一些接口直接在顶层返回列表（例如: {Code, Msg, Data: [...], TotalCount}
+        for k in ('data', 'Data', 'result', 'Result'):
+            top = payload.get(k)
+            if isinstance(top, list):
+                return top
+
+        candidates = [payload]
+        for k in ('data', 'Data', 'result', 'Result'):
+            if isinstance(payload.get(k), dict):
+                candidates.append(payload[k])
+
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            for key in (
+                'itemsInfos', 'items', 'list', 'records',
+                'commodityList', 'CommodityList', 'Items', 'Lists'
+            ):
+                lst = candidate.get(key)
+                if isinstance(lst, list):
+                    return lst
+        return []
+
+    def _fetch_market_data(self, template_id: int, page_index: int = 1, page_size: int = 50) -> Optional[List[Dict[str, Any]]]:
+        """通过 requests 调用显式配置的市场 API 获取在售列表
+
+        注意：默认不再调用 `inventory/list`，避免误拿账号库存。
+        必须在配置中提供 `market_api_url`（完整 URL）或 `market_api_path`（与 api_base_url 拼接）。
         """
-        if not self._driver:
-            self._init_selenium()
-        
-        if not self._driver:
-            self.logger.error("Selenium 不可用")
-            return None
-        
-        try:
-            # 构建URL
-            url = f'https://www.youpin898.com/market/goods-list?templateId={template_id}&gameId=730&listType=10'
-            
-            # 访问页面（对所有页码都重新加载）
-            self._driver.get(url)
-            self.logger.info(f"已加载页面（目标第 {page_index} 页）")
-            
-            # 等待页面初始化
-            self._safe_sleep(6)
-            
-            if page_index > 1:
-                # 先等待分页控件出现
-                self.logger.info(f"等待分页控件加载...")
-                self._safe_sleep(4)
-                
-                # 滚动到底部，确保分页控件在视图中
-                self._driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                self._safe_sleep(1)
-                
-                # 通过JavaScript点击指定页码（使用正确的class名）
-                self.logger.info(f"尝试翻页到第 {page_index} 页...")
-                
-                script = f"""
-                // 悠悠有品使用CSS Modules，class名为 paginationItem___xxxxx
-                // 方案1：直接点击目标页码
-                const items = document.querySelectorAll('[class*="paginationItem"]');
-                for (let item of items) {{
-                    if (item.textContent.trim() === '{page_index}') {{
-                        item.click();
-                        return 'direct_click_page_{page_index}';
-                    }}
-                }}
-                
-                // 方案2：多次点击下一页按钮
-                let clicks = {page_index - 1};
-                let completed = 0;
-                
-                function clickNext() {{
-                    if (completed >= clicks) return;
-                    
-                    // 查找下一页按钮（可能class名也是CSS Modules）
-                    const nextSelectors = [
-                        '[class*="paginationNext"]',
-                        '[class*="pagination"][class*="next"]',
-                        '.ant-pagination-next',
-                        'button:has-text("下一页")'
-                    ];
-                    
-                    let nextBtn = null;
-                    for (let selector of nextSelectors) {{
-                        try {{
-                            nextBtn = document.querySelector(selector);
-                            if (nextBtn && !nextBtn.classList.contains('disabled')) break;
-                        }} catch(e) {{}}
-                    }}
-                    
-                    if (nextBtn) {{
-                        nextBtn.click();
-                        completed++;
-                        
-                        if (completed < clicks) {{
-                            setTimeout(clickNext, 2000);
-                        }}
-                    }}
-                }}
-                
-                clickNext();
-                return 'multi_click_' + clicks;
-                """
-                
-                result = self._driver.execute_script(script)
-                self.logger.info(f"点击策略: {result}")
-                
-                # 等待数据加载
-                wait_time = 5 + (page_index - 1) * 3
-                self.logger.info(f"等待 {wait_time} 秒让数据加载...")
-                self._safe_sleep(wait_time)
-                
-                # 验证是否真的翻页了（使用新的选择器）
-                current_page_num = self._driver.execute_script("""
-                    // 查找高亮/激活的页码项
-                    const items = document.querySelectorAll('[class*="paginationItem"]');
-                    for (let item of items) {
-                        const classes = item.className;
-                        if (classes.includes('active') || classes.includes('Active') || 
-                            classes.includes('current') || classes.includes('Current') ||
-                            classes.includes('selected') || classes.includes('Selected')) {
-                            return item.textContent.trim();
-                        }
-                    }
-                    
-                    return '0';
-                """)
-                self.logger.info(f"当前页码显示: {current_page_num}")
-                
-                if str(current_page_num) != str(page_index):
-                    self.logger.warning(f"页码验证失败！期望第{page_index}页，实际第{current_page_num}页（继续尝试获取数据）")
-            else:
-                # 第一页直接等待
-                self._safe_sleep(3)
-            
-            self.logger.info("准备提取性能日志")
 
-            
-            # 从性能日志中提取 API 响应
-            self._safe_sleep(0.5)  # 减少等待时间
-            logs = self._driver.get_log('performance')
-            self.logger.info(f"获取到 {len(logs)} 条性能日志")
-            
-            # 对于所有页面，都检查最近的200条日志（增加范围）
-            if page_index == 1:
-                recent_logs = logs
-            else:
-                recent_logs = logs[-200:] if len(logs) > 200 else logs
-            
-            # 统计匹配的API URL数量
-            api_count = 0
-            for entry in recent_logs:
+        market_api_url = self.config.get('market_api_url')
+        market_api_path = self.config.get('market_api_path')
+        if not (market_api_url or market_api_path):
+            self.logger.info(f"未配置 Youpin 市场 API，尝试默认 {self.DEFAULT_MARKET_API_PATH}")
+            market_api_path = self.DEFAULT_MARKET_API_PATH
+
+        # 防御：禁止误用 inventory/list
+        for check in ('inventory/list', '/inventory/'):
+            if market_api_url and check in market_api_url:
+                self.logger.error("检测到 inventory/list 端点，已拒绝请求以避免获取账号库存。请提供正确的市场在售 API。")
+                return None
+            if market_api_path and check in market_api_path:
+                self.logger.error("检测到 inventory/list 端点，已拒绝请求以避免获取账号库存。请提供正确的市场在售 API。")
+                return None
+
+        referer = self._get_goods_list_url() or f'https://www.youpin898.com/market/goods-list?templateId={template_id}&gameId=730&listType=10'
+        self._ensure_token_headers(referer)
+
+        info = {
+            'templateId': int(template_id),
+            'gameId': int(self.config.get('game_id', 730)),
+            'listType': int(self.config.get('list_type', 10)),
+        }
+        # 只保留最常见的参数组合，避免瞬间大量请求导致 429
+        payload_post = {'pageIndex': page_index, 'pageSize': page_size, **info}
+        payload_get = {'pageIndex': page_index, 'pageSize': page_size, **info}
+
+        method_pref = str(self.config.get('market_method', 'POST')).upper()
+        methods_to_try = [method_pref] if method_pref in ('GET', 'POST') else ['POST']
+        if method_pref != 'GET':
+            methods_to_try.append('GET')
+        if method_pref != 'POST':
+            methods_to_try.append('POST')
+
+        extra_headers = self.config.get('market_headers') or self.config.get('market_request_headers') or {}
+
+        # Resolve base URL
+        url_candidates = []
+        if market_api_url:
+            url_candidates.append(market_api_url.rstrip('/'))
+        elif market_api_path:
+            for base in self._iter_api_bases():
+                url_candidates.append(f"{base}{market_api_path}")
+
+        def _build_attempts() -> List[Tuple[str, Dict[str, Any]]]:
+            attempts: List[Tuple[str, Dict[str, Any]]] = []
+            for m in methods_to_try:
+                if m == 'POST':
+                    attempts.append(('POST', payload_post))
+                elif m == 'GET':
+                    attempts.append(('GET', payload_get))
+            # 去重
+            seen = set()
+            uniq: List[Tuple[str, Dict[str, Any]]] = []
+            for m, p in attempts:
+                key = (m, tuple(sorted(p.items())))
+                if key not in seen:
+                    seen.add(key)
+                    uniq.append((m, p))
+            return uniq
+
+        attempts = _build_attempts()
+
+        # 退避参数（可在配置中覆盖）
+        max_attempts = int(self.config.get('market_max_attempts', 4))
+        backoff_base = float(self.config.get('market_backoff_base', 0.8))
+        backoff_cap = float(self.config.get('market_backoff_cap', 8.0))
+        request_delay = float(self.config.get('market_request_delay_seconds', 0.25))
+
+        tried = 0
+        for url in url_candidates:
+            for method, payload in attempts:
+                if tried >= max_attempts:
+                    break
+                tried += 1
+
+                # 每次请求单独传 headers，避免污染 session 全局头
+                call_headers = dict(extra_headers) if isinstance(extra_headers, dict) else {}
+
                 try:
-                    log_entry = json.loads(entry['message'])
-                    message = log_entry.get('message', {})
-                    method = message.get('method', '')
-                    
-                    if method == 'Network.responseReceived':
-                        response = message.get('params', {}).get('response', {})
-                        url_resp = response.get('url', '')
-                        
-                        if 'queryOnSaleCommodityList' in url_resp:
-                            api_count += 1
-                except:
+                    self.logger.debug(f"Youpin request: {method} {url} page={page_index}")
+                    resp = self.session.request(
+                        method,
+                        url,
+                        timeout=12,
+                        headers=call_headers,
+                        json=payload if method == 'POST' else None,
+                        params=payload if method == 'GET' else None,
+                    )
+
+                    # 403 基本是风控/权限，继续狂试只会更糟
+                    if resp.status_code == 403:
+                        self._log_http_block(url, resp)
+                        return None
+
+                    # 429：做退避再尝试下一次（避免瞬间触发更严格限制）
+                    if resp.status_code == 429:
+                        self._log_http_block(url, resp)
+                        sleep_s = min(backoff_cap, backoff_base * (2 ** (tried - 1)))
+                        sleep_s = sleep_s * (0.85 + random.random() * 0.3)  # jitter
+                        time.sleep(sleep_s)
+                        continue
+
+                    if resp.status_code != 200:
+                        # 其他状态：记录片段并继续
+                        self._log_http_block(url, resp)
+                        time.sleep(request_delay)
+                        continue
+
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        self._log_http_block(url, resp)
+                        time.sleep(request_delay)
+                        continue
+
+                    code = None
+                    if isinstance(data, dict):
+                        code = data.get('code')
+                        if code is None:
+                            code = data.get('Code')
+                    # 常见成功码：0；也可能直接没有 code
+                    if code not in (None, 0, '0'):
+                        # 85100 常见于版本/网络限制
+                        if str(code) == '85100':
+                            self.logger.warning(f"Youpin 返回限制码 85100，可能需要补齐 app-version/设备信息/浏览器指纹头。")
+                        self.logger.debug(f"{url} returned code={code}")
+                        time.sleep(request_delay)
+                        continue
+
+                    items = self._extract_items(data)
+                    if items:
+                        return items
+                    time.sleep(request_delay)
+                except Exception as e:
+                    # 网络错误等：稍微等一下再继续
+                    self.logger.debug(f"Youpin request exception: {e}")
+                    time.sleep(max(request_delay, 0.5))
                     continue
-            
-            self.logger.info(f"找到 {api_count} 个匹配的API响应")
-            
-            # 从后往前找最新的API响应
-            for entry in reversed(recent_logs):
-                try:
-                    log_entry = json.loads(entry['message'])
-                    message = log_entry.get('message', {})
-                    method = message.get('method', '')
-                    
-                    if method == 'Network.responseReceived':
-                        response = message.get('params', {}).get('response', {})
-                        url_resp = response.get('url', '')
-                        
-                        if 'queryOnSaleCommodityList' in url_resp:
-                            request_id = message.get('params', {}).get('requestId')
-                            
-                            try:
-                                response_body = self._driver.execute_cdp_cmd('Network.getResponseBody', {'requestId': request_id})
-                                body_text = response_body.get('body', '')
-                                if body_text:
-                                    api_data = json.loads(body_text)
-                                    
-                                    # 验证数据：检查商品数量，确保不是空数据
-                                    data_list = api_data.get('Data') or api_data.get('data', [])
-                                    if isinstance(data_list, dict):
-                                        data_list = data_list.get('commodityList') or data_list.get('CommodityList', [])
-                                    
-                                    if len(data_list) > 0:
-                                        self.logger.info(f"成功获取第 {page_index} 页数据（{len(data_list)}个商品）")
-                                        return api_data
-                                    else:
-                                        self.logger.warning(f"获取的数据为空，继续查找...")
-                                        continue
-                            except Exception as e:
-                                self.logger.warning(f"获取响应体失败: {e}")
-                                continue
-                except:
-                    continue
-            
-            self.logger.warning(f"未从性能日志中找到 API 响应 (page={page_index})")
-            return None
-                
-        except Exception as e:
-            self.logger.error(f"Selenium 获取市场数据失败 (page={page_index}): {e}")
-            return None
-    
-    def __del__(self):
-        """清理 Selenium WebDriver"""
-        if hasattr(self, '_driver') and self._driver:
-            try:
-                self.logger.info("正在关闭 Chrome WebDriver...")
-                self._driver.quit()
-            except Exception as e:
-                self.logger.warning(f"关闭 WebDriver 时出错: {e}")
-                # 尝试强制清理
-                try:
-                    import os
-                    import signal
-                    if hasattr(self._driver, 'service') and hasattr(self._driver.service, 'process'):
-                        pid = self._driver.service.process.pid
-                        os.kill(pid, signal.SIGTERM)
-                except Exception:
-                    pass
+
+        return None
     
     def get_item_price(
         self,
@@ -384,7 +310,7 @@ class YoupinMonitor(PlatformMonitor):
         item_config: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        获取悠悠有品平台商品价格（使用 Selenium 获取市场在售数据）
+        获取悠悠有品平台商品价格（requests API）
         
         Args:
             item_name: 商品名称
@@ -415,57 +341,45 @@ class YoupinMonitor(PlatformMonitor):
                 )
                 return results
 
-            # 直接使用 Selenium 从网页请求中捕获API响应（不走 requests）
+            # 直接使用 API 多页拉取
             self.logger.info(f"开始获取市场在售商品: {item_name} (templateId={template_id})")
 
-            # 收集多页数据（最多8页）
+            # 收集多页数据（最多8页，每页50条）
             all_items = []
             pages_fetched = 0
+            page_delay = float(self.config.get('market_page_delay_seconds', 1.0))
             for page in range(1, 9):
-                self.logger.info(f"获取第 {page} 页数据... (Selenium)")
+                self.logger.info(f"获取第 {page} 页数据... (API)")
 
-                api_data = self._fetch_market_data_selenium(template_id, page, 20)
-                if not api_data:
-                    self.logger.warning(f"第 {page} 页获取失败")
+                items = self._fetch_market_data(template_id, page, 50)
+                if not items:
+                    self.logger.warning(f"第 {page} 页无数据或请求失败，停止")
                     break
 
                 pages_fetched += 1
-                
-                code = api_data.get('Code') or api_data.get('code')
-                msg = api_data.get('Msg') or api_data.get('msg', '')
-                
-                if code != 0 and msg not in ['success', '成功']:
-                    self.logger.warning(f"第 {page} 页返回错误: Code={code}, Msg={msg}")
-                    break
-                
-                # 解析数据
-                data = api_data.get('Data') or api_data.get('data', [])
-                if isinstance(data, list):
-                    items = data
-                else:
-                    items = data.get('commodityList') or data.get('CommodityList', [])
-                
-                if len(items) == 0:
-                    self.logger.info(f"第 {page} 页没有数据，停止翻页")
-                    break
-                
                 all_items.extend(items)
+
+                # 翻页间隔：降低触发 429/84104 的概率
+                if page_delay > 0:
+                    time.sleep(page_delay)
                 
                 # 输出本页磨损范围和每个商品的详细信息
                 wears_in_page = []
                 prices_in_page = []
                 for item in items:
-                    abrade_str = item.get('abrade') or item.get('Abrade', '0')
-                    price_str = item.get('price') or item.get('Price', '0')
-                    commodity_name = item.get('commodityName') or item.get('CommodityName', '')
+                    abrade_raw = item.get('abrade') or item.get('Abrade') or item.get('wear') or item.get('Wear')
+                    price_raw = item.get('price') or item.get('Price') or item.get('sellingPrice') or item.get('SellingPrice')
+                    commodity_name = item.get('commodityName') or item.get('CommodityName') or item.get('name') or item.get('goods_name') or ''
                     try:
-                        wear = float(abrade_str)
-                        price = float(price_str)
+                        wear = float(abrade_raw)
+                        if wear > 1:
+                            wear = wear / 100.0
+                        price = float(price_raw)
                         wears_in_page.append(wear)
                         prices_in_page.append(price)
                         # 打印每个商品的详细信息
                         self.logger.debug(f"  [{page}页] {commodity_name[:20]}... 价格:{price} 磨损:{wear:.4f}")
-                    except:
+                    except Exception:
                         pass
                 
                 if wears_in_page:
@@ -488,19 +402,21 @@ class YoupinMonitor(PlatformMonitor):
             filtered = []
             
             for item in all_items:
-                commodity_name = item.get('commodityName') or item.get('CommodityName', '')
+                commodity_name = item.get('commodityName') or item.get('CommodityName') or item.get('name') or item.get('goods_name') or ''
                 actual = self._normalize_name(commodity_name)
                 
                 if expected != actual:
                     continue
                 
                 # 解析价格和磨损
-                price_str = item.get('price') or item.get('Price', '0')
-                abrade_str = item.get('abrade') or item.get('Abrade', '0')
+                price_raw = item.get('price') or item.get('Price') or item.get('sellingPrice') or item.get('SellingPrice') or 0
+                abrade_raw = item.get('abrade') or item.get('Abrade') or item.get('wear') or item.get('Wear') or 0
                 
                 try:
-                    price = float(price_str)
-                    wear = float(abrade_str)
+                    price = float(price_raw)
+                    wear = float(abrade_raw)
+                    if wear > 1:
+                        wear = wear / 100.0
                 except (ValueError, TypeError):
                     continue
                 

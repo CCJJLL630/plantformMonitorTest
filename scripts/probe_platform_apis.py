@@ -48,8 +48,7 @@ def probe_youpin() -> None:
     print("\n=== YOUPIN url params:", info)
 
     base = plat.get("base_url", "https://www.youpin898.com").rstrip("/")
-    # Some deployments only allow this API on api.youpin898.com
-    api_bases = [base, "https://api.youpin898.com"]
+    api_bases = [plat.get("api_base_url", "https://api.youpin898.com").rstrip("/")]
 
     s = requests.Session()
     s.headers.update({
@@ -73,6 +72,12 @@ def probe_youpin() -> None:
         s.headers["token"] = token
         s.headers["Authorization"] = f"Bearer {token}"
 
+    market_api_url = plat.get("market_api_url")
+    market_api_path = plat.get("market_api_path")
+    if not (market_api_url or market_api_path):
+        print("YOUPIN: 请配置 market_api_url 或 market_api_path（市场在售接口），当前跳过探测，避免误用 inventory/list（账户库存）。")
+        return
+
     # Try a few payload variants
     payloads = [
         {"pageIndex": 1, "pageSize": 20, **info},
@@ -80,12 +85,18 @@ def probe_youpin() -> None:
         {"pageIndex": 1, "pageSize": 20, "sortType": 0, **info},
     ]
 
-    for api_base in api_bases:
-        api = api_base.rstrip("/") + "/api/youpin/pc/inventory/list"
+    url_candidates = []
+    if market_api_url:
+        url_candidates.append(market_api_url.rstrip("/"))
+    if market_api_path:
+        for api_base in api_bases:
+            url_candidates.append(f"{api_base}{market_api_path}")
+
+    for api in url_candidates:
         for i, data in enumerate(payloads, start=1):
             try:
                 r = s.post(api, json=data, timeout=20)
-                print(f"\nYOUPIN {api_base} POST try #{i} status={r.status_code} ct={r.headers.get('Content-Type','')}")
+                print(f"\nYOUPIN POST try #{i} url={api} status={r.status_code} ct={r.headers.get('Content-Type','')}")
                 print(r.text[:300].replace("\n", "\\n"))
                 j = r.json()
                 print("keys:", list(j.keys())[:20])
