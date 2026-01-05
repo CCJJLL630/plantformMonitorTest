@@ -9,7 +9,8 @@ from typing import List, Dict, Any
 from logging.handlers import RotatingFileHandler
 import os
 
-from monitors import BuffMonitor, YoupinMonitor, EcosteamMonitor
+from monitors import BuffMonitor, YoupinMonitor
+from monitors.ecosteam_selenium import EcosteamSeleniumMonitor
 from utils import Config, Database, Notifier
 from utils.result_saver import save_monitoring_results
 
@@ -116,7 +117,7 @@ class PriceMonitor:
             elif platform == 'youpin':
                 monitors['youpin'] = YoupinMonitor(platform_config)
             elif platform == 'ecosteam':
-                monitors['ecosteam'] = EcosteamMonitor(platform_config)
+                monitors['ecosteam'] = EcosteamSeleniumMonitor(platform_config)
             
             self.logger.info(f"已启用平台: {platform}")
         

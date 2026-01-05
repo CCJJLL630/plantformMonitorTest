@@ -2,6 +2,6 @@
 from .base import PlatformMonitor
 from .buff import BuffMonitor
 from .youpin import YoupinMonitor
-from .ecosteam import EcosteamMonitor
+from .ecosteam_selenium import EcosteamSeleniumMonitor
 
-__all__ = ['PlatformMonitor', 'BuffMonitor', 'YoupinMonitor', 'EcosteamMonitor']
+__all__ = ['PlatformMonitor', 'BuffMonitor', 'YoupinMonitor', 'EcosteamSeleniumMonitor']
