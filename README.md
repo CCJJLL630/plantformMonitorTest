@@ -10,38 +10,54 @@
 - 📱 **多种通知方式**：支持邮件、钉钉、企业微信等多种通知方式
 - 💾 **数据存储**：自动保存价格历史记录，支持数据分析
 - ⚙️ **灵活配置**：通过JSON配置文件轻松管理监控项目
+- 🍪 **自动Cookie管理**：提供Cookie自动获取工具，简化配置流程
+
+## 最新更新 (refactor-optimized分支)
+
+**v2.0 重构优化版本**
+- ✅ 重写悠悠有品监控器，逻辑更清晰，自动设置Cookie，支持完整翻页
+- ✅ ECOSteam使用Selenium版本，解决网络超时和数据获取问题
+- ✅ 新增Cookie自动获取工具（`scripts/get_cookie.py`）
+- ✅ 清理所有冗余测试和诊断代码，项目结构更简洁
+- ✅ 修正磨损范围配置（0.15-0.38完整久经沙场范围）
+- ✅ 代码优化：删除1500行冗余代码，新增654行核心功能
+
+**测试验证结果**：
+- BUFF平台：✅ 20个商品，价格范围 ¥390-480
+- 悠悠有品：✅ 80个商品（8页完整数据），价格范围 ¥308-369
+- ECOSteam：✅ 75个商品（8页），13个符合磨损范围，价格范围 ¥376-520
 
 ## 项目结构
 
 ```
-PlantformMonitor/
-├── main.py                  # 主程序入口
-├── start_monitor.bat        # Windows启动脚本（推荐使用）
-├── config.json.example      # 配置文件模板
-├── requirements.txt         # Python依赖包
-├── README.md               # 项目说明文档
-├── monitors/               # 平台监控模块
+plantformMonitorTest/
+├── main.py                     # 主程序入口
+├── start_monitor.bat           # Windows启动脚本（推荐使用）
+├── config.json                 # 配置文件（需手动创建，参考config.json.example）
+├── config.json.example         # 配置文件模板
+├── requirements.txt            # Python依赖包
+├── README.md                   # 项目说明文档
+├── monitors/                   # 平台监控模块
 │   ├── __init__.py
-│   ├── base.py            # 监控器基类
-│   ├── buff.py            # 网易BUFF监控
-│   ├── youpin.py          # 悠悠有品监控（Selenium）
-│   └── ecosteam.py        # ECOSteam监控（HTML解析兜底）
-├── utils/                  # 工具模块
+│   ├── base.py                # 监控器基类
+│   ├── buff.py                # 网易BUFF监控
+│   ├── youpin.py              # 悠悠有品监控（Selenium + Cookie自动设置）
+│   └── ecosteam_selenium.py   # ECOSteam监控（Selenium完整版）
+├── utils/                      # 工具模块
 │   ├── __init__.py
-│   ├── config.py          # 配置管理
-│   ├── database.py        # 数据库操作
-│   ├── notification.py    # 通知模块
-│   └── result_saver.py    # 结果汇总保存
-├── scripts/                # 工具脚本（可选）
-│   ├── dump_ecosteam_html_sell_list.py    # 导出ECOSteam完整数据
-│   ├── filter_ecosteam_dump.py            # 筛选和排序数据
-│   └── probe_platform_apis.py             # API探测工具
-├── data/                   # 数据存储目录
-│   ├── price_history.db                   # 价格历史数据库（自动创建）
+│   ├── config.py              # 配置管理
+│   ├── database.py            # 数据库操作
+│   ├── notification.py        # 通知模块
+│   └── result_saver.py        # 结果汇总保存
+├── scripts/                    # 工具脚本
+│   ├── get_cookie.py          # Cookie自动获取工具（新增）
+│   └── get_cookie.bat         # Cookie获取工具Windows启动脚本
+├── data/                       # 数据存储目录
+│   ├── price_history.db       # 价格历史数据库（自动创建）
 │   ├── latest_monitoring_result.json      # 最新监控结果汇总
 │   └── monitoring_result_*.json           # 历史监控结果备份
-└── logs/                   # 日志目录
-    └── monitor.log        # 运行日志（自动创建）
+└── logs/                       # 日志目录
+    └── monitor.log            # 运行日志（自动创建）
 ```
 
 ## 快速开始
@@ -68,6 +84,27 @@ python -m venv venv
 ```
 
 ### 3. 配置设置
+
+#### 方式1：使用Cookie自动获取工具（推荐）
+
+我们提供了自动获取Cookie的工具，无需手动复制粘贴：
+
+```powershell
+# Windows用户：双击运行
+scripts\get_cookie.bat
+
+# 或者使用命令行
+python scripts/get_cookie.py
+```
+
+工具会自动：
+1. 打开浏览器让你登录各个平台
+2. 自动提取Cookie
+3. 更新到config.json配置文件
+
+支持的平台：BUFF、悠悠有品(UU)、ECOSteam
+
+#### 方式2：手动配置
 
 复制配置模板并编辑：
 
@@ -112,22 +149,40 @@ Copy-Item config.json.example config.json
 }
 ```
 
-重要：如需访问需要登录/鉴权的平台接口，通常需要在对应平台配置中加入 `Cookie`（或 `cookie`）字段。该字段通常包含敏感信息，请勿提交到公开仓库。
+重要：如需访问需要登录/鉴权的平台接口，需要在对应平台配置中加入 `Cookie` 字段。
 
-**ECOSteam Cookie 配置示例**：
+**推荐使用 `scripts/get_cookie.py` 工具自动获取Cookie**，或手动获取：
+
+**手动获取 Cookie 的方法**：
+1. 浏览器登录对应平台（如 ECOSteam）
+2. F12 打开开发者工具 → Network 标签页 → 刷新页面
+3. 找到任意请求 → Headers → Request Headers → 复制 Cookie 值
+4. 将完整 Cookie 字符串粘贴到 config.json 的对应平台 Cookie 字段
+
+**各平台Cookie配置示例**：
+
 ```json
-"ecosteam": {
-    "enabled": true,
-    "base_url": "https://www.ecosteam.cn",
-    "Cookie": "SessionID=你的SessionID; PHPSESSID=你的PHPSESSID; 其他必需字段"
+"platforms": {
+    "buff": {
+        "enabled": true,
+        "base_url": "https://buff.163.com",
+        "Cookie": "session=你的session值; csrf_token=你的token; Device-Id=设备ID"
+    },
+    "youpin": {
+        "enabled": true,
+        "base_url": "https://www.youpin898.com",
+        "api_base_url": "https://api.youpin898.com",
+        "Cookie": "uu_token=你的JWT_token值"
+    },
+    "ecosteam": {
+        "enabled": true,
+        "base_url": "https://www.ecosteam.cn",
+        "Cookie": "loginToken=你的token; refreshToken=你的refresh_token; clientId=客户端ID"
+    }
 }
 ```
 
-获取 Cookie 的方法：
-1. 浏览器登录 ECOSteam
-2. F12 打开开发者工具 → Network 标签页 → 刷新页面
-3. 找到任意请求 → Headers → Request Headers → 复制 Cookie 值
-4. 将完整 Cookie 字符串粘贴到 config.json 的 ecosteam.Cookie 字段
+⚠️ **安全提示**：Cookie包含敏感信息，请勿将 `config.json` 提交到公开仓库。
 
 ### 4. 运行程序
 
@@ -181,13 +236,30 @@ python main.py
 - `target_price`: 目标价格（低于此价格将触发通知）
 - `platforms`: 要监控的平台列表
 
-部分平台支持在 `items` 中增加平台专用字段以提升稳定性：
+部分平台支持在 `items` 中增加平台专用字段以提升稳定性和准确性：
 
-- BUFF：`buff_goods_id`（推荐填写，避免依赖搜索接口）
-- 悠悠有品：`youpin_template_id`（或兼容字段 `youpin_goods_id`）
-- ECOSteam：可在 `items` 中配置 `eco_goods_url`/`ecosteam_goods_url` 指向商品详情页（否则使用 `platforms.ecosteam.goods_detail_url`）
+- **BUFF**：`buff_goods_id`（推荐填写，直接定位商品，避免搜索接口问题）
+- **悠悠有品**：`youpin_template_id` 或 `youpin_goods_list_url`（推荐填写模板ID）
+- **ECOSteam**：`ecosteam_goods_detail_url`（商品详情页完整URL）
 
-> 这些字段均为可选，但填写后更容易“精准定位”商品。
+**完整配置示例**：
+
+```json
+{
+    "name": "宙斯x27电击枪 | 鼾龙传说 (久经沙场)",
+    "wear_range": {
+        "min": 0.15,
+        "max": 0.38
+    },
+    "target_price": 300.0,
+    "platforms": ["buff", "youpin", "ecosteam"],
+    "buff_goods_id": 968354,
+    "youpin_template_id": 109545,
+    "ecosteam_goods_detail_url": "https://www.ecosteam.cn/goods/730-15231-1-laypagesale-0-1.html"
+}
+```
+
+> 这些字段均为可选，但填写后更容易精准定位商品，提高监控成功率。
 
 ### 通知配置
 
@@ -273,16 +345,50 @@ cat logs/monitor.log
 
 ### 悠悠有品（Youpin）说明
 
-- 当前实现为 **直接使用 Selenium** 从网页请求中捕获接口响应（避免 `requests` 直连接口被 403/拦截）。
-- 需要安装 `selenium`，并确保本机已安装 Chrome 且 `chromedriver` 与 Chrome 版本匹配（或已在 PATH 中可用）。
-- **⚠️ Windows 注意**：由于 Selenium 需要较长时间进行页面加载和分页操作，在 PowerShell 后台运行时可能会收到系统信号中断。程序已实现自动重试和信号处理机制。
-- 如遇到频繁中断，请使用 `start_monitor.bat` 前台运行。
+**v2.0 优化版本**：
+- ✅ 使用 Selenium 自动捕获API响应，稳定可靠
+- ✅ 自动设置Cookie，无需手动处理登录态
+- ✅ 支持完整翻页，可获取所有页面数据（最多8页）
+- ✅ 智能等待和重试机制，适应网络波动
+
+**技术实现**：
+- 直接使用 Selenium 从网页性能日志中捕获 `queryOnSaleCommodityList` API响应
+- 自动设置Cookie到`.youpin898.com`域名，避免登录弹窗
+- 支持自动翻页，每页等待15-20秒确保API加载完成
+
+**环境要求**：
+- 需要安装 `selenium` 和 Chrome浏览器
+- 确保 ChromeDriver 与 Chrome 版本匹配
+- Cookie配置：使用 `scripts/get_cookie.py` 自动获取或手动配置 `uu_token`
+
+**性能说明**：
+- 首页加载约20秒，翻页约15秒/页
+- 获取8页数据约需2-3分钟
+- 程序会自动过滤磨损范围，返回价格最低的20个商品
 
 ### ECOSteam 说明
 
-- ECOSteam 的"在售列表（含磨损 float）"接口通常需要有效登录态。
-- 若日志出现"用户未登录 / Cookie 可能已过期 / refreshToken 过期"等提示，请更新 `config.json` 中 `platforms.ecosteam.Cookie`（通常包含 `loginToken` / `refreshToken` / `clientId` 等）。
-- 即使 API 失败，程序会自动切换到 HTML 解析模式作为备用方案。
+**v2.0 Selenium完整版本**：
+- ✅ 使用 Selenium 完整渲染页面，解决网络超时问题
+- ✅ 自动设置Cookie，支持登录态
+- ✅ 支持多页数据获取（默认8页）
+- ✅ 120秒页面加载超时，适应慢速网络
+
+**技术实现**：
+- 先访问主页设置Cookie到`.ecosteam.cn`域名
+- 逐页访问商品列表，使用正则表达式解析磨损和价格数据
+- 每页等待5秒确保数据渲染完成
+- 自动过滤磨损范围并按价格排序
+
+**Cookie配置**：
+- 包含字段：`loginToken`、`refreshToken`、`clientId` 等
+- 使用 `scripts/get_cookie.py` 自动获取（推荐）
+- 或手动从浏览器开发者工具复制
+
+**性能说明**：
+- 每页加载时间：2-25秒（取决于网络速度）
+- 8页数据约需2-4分钟
+- 程序会输出每页解析结果和统计信息
 
 ## 故障排除
 
@@ -311,11 +417,30 @@ cat logs/monitor.log
 
 ### Cookie 过期问题
 
-所有平台的 Cookie 都有有效期，需要定期更新：
+所有平台的 Cookie 都有有效期，需要定期更新。
 
+**推荐方法：使用自动获取工具**
+```powershell
+# 运行Cookie获取工具
+python scripts/get_cookie.py
+# 或双击 scripts\get_cookie.bat
+```
+
+工具会：
+1. 打开浏览器让你登录
+2. 自动提取Cookie
+3. 更新config.json配置文件
+4. 无需手动复制粘贴
+
+**手动更新方法**：
 1. **获取方法**：浏览器登录 → F12 开发者工具 → Network → 复制 Cookie
 2. **更新位置**：`config.json` 中对应平台的 `Cookie` 字段
 3. **验证**：重新运行程序，查看日志是否仍有认证错误
+
+**Cookie有效期**：
+- BUFF：通常7-30天
+- 悠悠有品：JWT token约10天
+- ECOSteam：loginToken约7天
 
 ### 性能优化建议
 
@@ -410,20 +535,34 @@ A:
 
 ## 工具脚本说明
 
-`scripts/` 目录包含一些辅助工具，用于数据分析和测试：
+### Cookie自动获取工具（推荐）
 
-- `probe_platform_apis.py`: 探测和测试各平台 API 接口
-- `dump_ecosteam_html_sell_list.py`: 导出 ECOSteam 完整在售商品列表（HTML解析）
-- `filter_ecosteam_dump.py`: 筛选指定磨损区间的商品并按价格排序
+`scripts/get_cookie.py` - 自动获取并更新各平台Cookie
 
-使用示例：
+**功能**：
+- 自动打开浏览器让你登录各平台
+- 自动提取Cookie值
+- 自动更新到config.json配置文件
+- 支持BUFF、悠悠有品(UU)、ECOSteam三个平台
+
+**使用方法**：
 ```powershell
-# 导出 ECOSteam 全量数据
-./venv/Scripts/python.exe scripts/dump_ecosteam_html_sell_list.py
+# 方式1：使用批处理文件（推荐）
+scripts\get_cookie.bat
 
-# 筛选磨损区间 0.15-0.2605 的商品
-./venv/Scripts/python.exe scripts/filter_ecosteam_dump.py
+# 方式2：直接运行Python脚本
+python scripts/get_cookie.py
+
+# 虚拟环境
+./venv/Scripts/python.exe scripts/get_cookie.py
 ```
+
+**操作步骤**：
+1. 运行脚本，会打开Chrome浏览器
+2. 在浏览器中登录对应平台（如BUFF、UU、ECOSteam）
+3. 登录成功后，脚本自动提取Cookie
+4. Cookie自动保存到config.json
+5. 无需手动复制粘贴，一键完成配置
 
 ## 许可证
 
