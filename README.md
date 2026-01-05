@@ -297,6 +297,26 @@ python main.py
 }
 ```
 
+#### QQ消息通知（Qmsg酱）
+
+**推荐**：免费、简单、实时推送
+
+```json
+"qmsg": {
+    "enabled": true,
+    "key": "YOUR_QMSG_KEY",      // 从 https://qmsg.zendee.cn/ 获取
+    "msg_type": "send",           // send=私聊, group=群聊
+    "qq": ""                      // 留空=发给自己, 填QQ号=指定接收人, 填群号=发给群
+}
+```
+
+**配置步骤**：
+1. 访问 https://qmsg.zendee.cn/ 获取KEY
+2. 添加QQ好友 `2082184065` 并发送 `@me` 激活
+3. 在 `config.json` 中配置KEY
+
+详细配置指南：[docs/QMSG_GUIDE.md](docs/QMSG_GUIDE.md)
+
 ## 使用示例
 
 ### 监控多个商品

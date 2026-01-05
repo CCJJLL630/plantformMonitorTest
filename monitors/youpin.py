@@ -268,7 +268,7 @@ class YoupinMonitor(PlatformMonitor):
 
             # 2. 收集所有页面的商品数据
             all_items = []
-            max_pages = 8  # 最多获取8页
+            max_pages = 20  # 最多获取20页
             
             for page in range(1, max_pages + 1):
                 page_items = self._fetch_page_data(template_id, page)

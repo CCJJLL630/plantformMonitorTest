@@ -47,6 +47,20 @@ class Notifier:
         # 企业微信通知
         if self.config.get('wechat', {}).get('enabled'):
             self._send_wechat(title, message)
+        
+        # QQ消息通知（Qmsg酱）- 支持多个配置
+        qmsg_config = self.config.get('qmsg')
+        if qmsg_config:
+            # 支持单个配置（字典）或多个配置（列表）
+            if isinstance(qmsg_config, list):
+                # 多个qmsg配置
+                for idx, config in enumerate(qmsg_config):
+                    if config.get('enabled'):
+                        self._send_qq_qmsg(title, message, config, idx + 1)
+            elif isinstance(qmsg_config, dict):
+                # 单个qmsg配置（向后兼容）
+                if qmsg_config.get('enabled'):
+                    self._send_qq_qmsg(title, message, qmsg_config)
     
     def _build_message(self, title: str, content: str, price_list: List[Dict[str, Any]] = None) -> str:
         """
@@ -202,3 +216,58 @@ class Notifier:
         
         except Exception as e:
             self.logger.error(f"企业微信通知发送失败: {e}")
+    
+    def _send_qq_qmsg(self, title: str, content: str, qmsg_config: dict = None, index: int = None):
+        """
+        通过Qmsg酱发送QQ消息
+        
+        Args:
+            title: 标题
+            content: 内容
+            qmsg_config: Qmsg配置字典（可选，默认从self.config读取）
+            index: 配置索引（用于多配置场景的日志标识）
+        """
+        try:
+            # 使用传入的配置或从self.config读取（向后兼容）
+            config = qmsg_config or self.config.get('qmsg', {})
+            key = config.get('key')
+            msg_type = config.get('msg_type', 'send')  # send=好友, group=群聊
+            qq = config.get('qq', '')  # QQ号或群号
+            
+            if not key:
+                prefix = f"#{index} " if index else ""
+                self.logger.warning(f"{prefix}Qmsg酱KEY未配置，跳过QQ消息发送")
+                return
+            
+            # 构建消息内容（Qmsg支持换行）
+            message = f"{title}\n\n{content}"
+            
+            # 限制消息长度（Qmsg限制）
+            if len(message) > 1000:
+                message = message[:997] + "..."
+            
+            # API地址
+            url = f"https://qmsg.zendee.cn/{msg_type}/{key}"
+            
+            # 请求参数
+            params = {
+                "msg": message
+            }
+            if qq:
+                params["qq"] = qq
+            
+            # 发送请求
+            response = requests.post(url, data=params, timeout=10)
+            response.raise_for_status()
+            
+            result = response.json()
+            if result.get('success'):
+                success_msg = f"Qmsg酱消息发送成功 #{index}" if index else "Qmsg酱消息发送成功"
+                self.logger.info(success_msg)
+            else:
+                error_prefix = f"#{index} " if index else ""
+                self.logger.error(f"{error_prefix}Qmsg酱消息发送失败: {result.get('reason')}")
+        
+        except Exception as e:
+            error_prefix = f"#{index} " if index else ""
+            self.logger.error(f"{error_prefix}Qmsg酱消息发送失败: {e}")

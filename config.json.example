@@ -47,7 +47,30 @@
         "wechat": {
             "enabled": false,
             "webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY"
+        },
+        "qmsg": {
+            "enabled": false,
+            "key": "YOUR_QMSG_KEY",
+            "msg_type": "send",
+            "qq": ""
         }
+    },
+    "qmsg_multi_example": {
+        "comment": "多Qmsg配置示例（支持数组格式，可同时发送到多个目标）",
+        "qmsg": [
+            {
+                "enabled": true,
+                "key": "YOUR_QMSG_KEY_1",
+                "msg_type": "send",
+                "qq": "123456789"
+            },
+            {
+                "enabled": true,
+                "key": "YOUR_QMSG_KEY_2",
+                "msg_type": "group",
+                "qq": "987654321"
+            }
+        ]
     },
     "database": {
         "type": "sqlite",
