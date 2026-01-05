@@ -84,7 +84,7 @@ class Notifier:
                     f"  商品: {item.get('item_name', '未知')}\n"
                     f"  价格: ¥{item.get('price', 0):.2f}\n"
                     f"  磨损: {item.get('wear', 0):.6f}\n"
-                    f"  链接: {item.get('url', '无')}\n\n"
+                   # f"  链接: {item.get('url', '无')}\n\n"
                 )
         
         return message

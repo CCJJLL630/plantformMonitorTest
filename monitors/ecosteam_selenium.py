@@ -35,7 +35,10 @@ class EcosteamSeleniumMonitor(PlatformMonitor):
         self.logger.info("正在启动 Chrome WebDriver...")
         chrome_options = Options()
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        # 禁用SSL错误日志
+        chrome_options.add_argument("--log-level=3")  # 只显示严重错误
+        chrome_options.add_argument("--silent")
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
         chrome_options.add_experimental_option("useAutomationExtension", False)
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--no-sandbox")

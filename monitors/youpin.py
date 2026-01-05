@@ -74,7 +74,10 @@ class YoupinMonitor(PlatformMonitor):
             chrome_options.add_argument('--no-sandbox')
             chrome_options.add_argument('--disable-dev-shm-usage')
             chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-            chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
+            # 禁用SSL错误日志
+            chrome_options.add_argument('--log-level=3')  # 只显示严重错误
+            chrome_options.add_argument('--silent')
+            chrome_options.add_experimental_option('excludeSwitches', ['enable-automation', 'enable-logging'])
             chrome_options.add_experimental_option('useAutomationExtension', False)
             
             # 启用性能日志
@@ -268,7 +271,7 @@ class YoupinMonitor(PlatformMonitor):
 
             # 2. 收集所有页面的商品数据
             all_items = []
-            max_pages = 20  # 最多获取20页
+            max_pages = 13  # 最多获取13页
             
             for page in range(1, max_pages + 1):
                 page_items = self._fetch_page_data(template_id, page)
