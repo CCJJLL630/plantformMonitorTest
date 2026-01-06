@@ -93,12 +93,20 @@ class Notifier:
             
             msg.attach(MIMEText(content, 'plain', 'utf-8'))
             
-            # 连接SMTP服务器
-            server = smtplib.SMTP(
-                email_config.get('smtp_server'),
-                email_config.get('smtp_port', 587)
-            )
-            server.starttls()
+            smtp_server = email_config.get('smtp_server')
+            smtp_port = email_config.get('smtp_port', 465)
+            use_ssl = email_config.get('use_ssl', True)
+            
+            # 根据配置选择SSL或STARTTLS连接方式
+            if use_ssl and smtp_port == 465:
+                # 使用SSL加密连接（QQ邮箱推荐方式）
+                server = smtplib.SMTP_SSL(smtp_server, smtp_port)
+            else:
+                # 使用STARTTLS方式
+                server = smtplib.SMTP(smtp_server, smtp_port)
+                server.starttls()
+            
+            # 登录邮箱
             server.login(
                 email_config.get('sender'),
                 email_config.get('password')

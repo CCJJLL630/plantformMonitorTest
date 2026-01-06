@@ -344,11 +344,12 @@ class YoupinMonitor(PlatformMonitor):
             # 直接使用 API 多页拉取
             self.logger.info(f"开始获取市场在售商品: {item_name} (templateId={template_id})")
 
-            # 收集多页数据（最多8页，每页50条）
+            # 收集多页数据（从配置读取最大页数，默认2页确保获取前80个商品）
             all_items = []
             pages_fetched = 0
-            page_delay = float(self.config.get('market_page_delay_seconds', 1.0))
-            for page in range(1, 9):
+            max_pages = int(self.config.get('max_pages', 2))  # 默认2页x50=100个商品
+            page_delay = float(self.config.get('market_page_delay_seconds', 2.0))
+            for page in range(1, max_pages + 1):
                 self.logger.info(f"获取第 {page} 页数据... (API)")
 
                 items = self._fetch_market_data(template_id, page, 50)
@@ -359,9 +360,13 @@ class YoupinMonitor(PlatformMonitor):
                 pages_fetched += 1
                 all_items.extend(items)
 
-                # 翻页间隔：降低触发 429/84104 的概率
-                if page_delay > 0:
-                    time.sleep(page_delay)
+                # 翻页间隔：降低触发 429/84104 的概率，增加随机性
+                if page_delay > 0 and page < max_pages:
+                    # 增加10-30%的随机延迟，避免固定间隔被识别
+                    jitter = random.uniform(0.1, 0.3)
+                    actual_delay = page_delay * (1 + jitter)
+                    self.logger.debug(f"等待 {actual_delay:.2f} 秒后请求下一页...")
+                    time.sleep(actual_delay)
                 
                 # 输出本页磨损范围和每个商品的详细信息
                 wears_in_page = []
@@ -390,12 +395,8 @@ class YoupinMonitor(PlatformMonitor):
                     self.logger.info(f"第 {page} 页: {len(items)}个商品 | 磨损: {min_wear:.4f}~{max_wear:.4f} | 价格: ¥{min_price:.2f}~¥{max_price:.2f}")
                 else:
                     self.logger.info(f"第 {page} 页获取到 {len(items)} 个商品")
-                
-                # 找到了足够的数据就停止（至少6页）
-                if page >= 6 and len(all_items) >= 60:
-                    break
 
-            self.logger.info(f"共获取 {len(all_items)} 个在售商品（{pages_fetched} 页）")
+            self.logger.info(f"共获取 {len(all_items)} 个在售商品（{pages_fetched}/{max_pages} 页）")
             
             # 过滤和排序
             expected = self._normalize_name(item_name)

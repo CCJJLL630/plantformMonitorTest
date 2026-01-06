@@ -23,6 +23,7 @@ class EcosteamMonitor(PlatformMonitor):
         - 磨损在 <p class="WearRate"> ... <span>0.xxx</span>
         - 分页链接形如: /goods/...-0-2.html 且带 data-page
         """
+        import random
 
         def _detect_max_page(page_html: str) -> int:
             nums = [int(m.group(1)) for m in re.finditer(r'data-page="(\d+)"', page_html)]
@@ -62,17 +63,45 @@ class EcosteamMonitor(PlatformMonitor):
 
         response = self._make_request(goods_url)
         html1 = response.text
-        max_page = _detect_max_page(html1)
+        max_page_on_site = _detect_max_page(html1)
 
         all_rows: List[Dict[str, float]] = []
-        all_rows.extend(_parse_rows(html1))
+        page1_rows = _parse_rows(html1)
+        all_rows.extend(page1_rows)
+        
+        # 记录第一页的磨损范围
+        if page1_rows:
+            wears = [r['wear'] for r in page1_rows]
+            self.logger.info(f"ECOSteam 第1页：{len(page1_rows)}个商品，磨损范围 {min(wears):.6f}-{max(wears):.6f}")
 
-        # 最多抓取前 10 页，避免异常情况下无限翻页
-        for page in range(2, min(max_page, 10) + 1):
+        # 从配置读取最大页数，默认20页
+        config_max_pages = int(self.config.get('max_pages', 20))
+        actual_max_page = min(max_page_on_site, config_max_pages)
+        page_delay = float(self.config.get('page_delay_seconds', 1.0))
+        
+        self.logger.info(f"ECOSteam 网站共{max_page_on_site}页，将抓取前{actual_max_page}页")
+
+        # 抓取后续页面
+        for page in range(2, actual_max_page + 1):
+            # 添加随机延迟，避免触发反爬
+            if page_delay > 0:
+                jitter = random.uniform(0.1, 0.3)
+                actual_delay = page_delay * (1 + jitter)
+                time.sleep(actual_delay)
+            
             url = _page_url(goods_url, page)
             page_html = self._make_request(url).text
-            all_rows.extend(_parse_rows(page_html))
+            page_rows = _parse_rows(page_html)
+            all_rows.extend(page_rows)
+            
+            # 记录每页的磨损范围
+            if page_rows:
+                wears = [r['wear'] for r in page_rows]
+                self.logger.info(f"ECOSteam 第{page}页：{len(page_rows)}个商品，磨损范围 {min(wears):.6f}-{max(wears):.6f}")
+            else:
+                self.logger.warning(f"ECOSteam 第{page}页未解析到数据")
 
+        self.logger.info(f"ECOSteam HTML解析完成：共{len(all_rows)}个商品（{actual_max_page}页）")
         return all_rows
 
     def _parse_goods_url(self, url: str) -> Dict[str, int]:

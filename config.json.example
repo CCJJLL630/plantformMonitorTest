@@ -44,10 +44,11 @@
     "notification": {
         "email": {
             "enabled": false,
-            "smtp_server": "smtp.example.com",
-            "smtp_port": 587,
-            "sender": "your-email@example.com",
-            "password": "your-password",
+            "smtp_server": "smtp.qq.com",
+            "smtp_port": 465,
+            "use_ssl": true,
+            "sender": "your-qq-email@qq.com",
+            "password": "your-qq-authorization-code",
             "receivers": ["receiver@example.com"]
         },
         "dingtalk": {
