@@ -4,6 +4,7 @@ from typing import Dict, List, Any, Optional
 import requests
 import time
 import logging
+from urllib.parse import urlparse
 
 
 class PlatformMonitor(ABC):
@@ -19,6 +20,7 @@ class PlatformMonitor(ABC):
         self.config = config
         self.base_url = config.get('base_url', '')
         self.session = requests.Session()
+        self.proxies = config.get('proxies') or config.get('proxy')
         # 基础 UA，尽量模拟浏览器
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -27,11 +29,38 @@ class PlatformMonitor(ABC):
         extra_headers = config.get('headers')
         if isinstance(extra_headers, dict):
             self.session.headers.update(extra_headers)
-        # 兼容配置中使用 "cookie" 或 "Cookie" 写法
+
+        # 兼容配置中使用 "cookie" 或 "Cookie" 写法。
+        # 不要把 Cookie 写死在 Header（否则服务端 Set-Cookie 更新不会生效，容易一直 403）。
         cookie = config.get('cookie') or config.get('Cookie')
         if cookie:
-            self.session.headers['Cookie'] = cookie
+            self._load_cookie_string(str(cookie))
         self.logger = logging.getLogger(self.__class__.__name__)
+
+    def _load_cookie_string(self, cookie: str) -> None:
+        """将 'a=1; b=2' 形式的 cookie 字符串写入 session.cookies。"""
+        if not cookie:
+            return
+
+        host = ''
+        try:
+            host = urlparse(self.base_url).hostname or ''
+        except Exception:
+            host = ''
+
+        parts = [p.strip() for p in cookie.split(';') if p.strip()]
+        for part in parts:
+            if '=' not in part:
+                continue
+            name, value = part.split('=', 1)
+            name = name.strip()
+            value = value.strip()
+            if not name:
+                continue
+            if host:
+                self.session.cookies.set(name, value, domain=host)
+            else:
+                self.session.cookies.set(name, value)
     
     @abstractmethod
     def get_item_price(
@@ -72,6 +101,8 @@ class PlatformMonitor(ABC):
             响应对象
         """
         try:
+            if self.proxies and 'proxies' not in kwargs:
+                kwargs['proxies'] = self.proxies
             response = self.session.request(method, url, timeout=10, **kwargs)
             response.raise_for_status()
             return response

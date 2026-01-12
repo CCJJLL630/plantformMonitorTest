@@ -8,6 +8,7 @@ import signal
 from typing import List, Dict, Any
 from logging.handlers import RotatingFileHandler
 import os
+from collections import deque
 
 from monitors import BuffMonitor, YoupinMonitor, EcosteamMonitor
 from utils import Config, Database, Notifier
@@ -65,6 +66,11 @@ class PriceMonitor:
         log_level = log_config.get('level', 'INFO')
         max_bytes = log_config.get('max_bytes', 10485760)  # 10MB
         backup_count = log_config.get('backup_count', 5)
+
+        # 行数裁剪配置：当日志超过 max_lines 行时，裁掉前 trim_head_lines 行。
+        # 说明：这是“剪头”策略，不依赖外部 logrotate。
+        self._log_trim_max_lines = int(log_config.get('max_lines', 30000))
+        self._log_trim_head_lines = int(log_config.get('trim_head_lines', 25000))
         
         # 确保日志目录存在
         log_dir = os.path.dirname(log_file)
@@ -85,6 +91,7 @@ class PriceMonitor:
             encoding='utf-8'
         )
         file_handler.setFormatter(formatter)
+        self._file_handler = file_handler
         
         # 控制台处理器
         console_handler = logging.StreamHandler()
@@ -97,6 +104,75 @@ class PriceMonitor:
         root_logger.addHandler(console_handler)
         
         self.logger = logging.getLogger(self.__class__.__name__)
+
+    def _trim_log_file_if_needed(self):
+        """当 monitor.log 行数过多时，安全裁掉文件头部的部分行。
+
+        关键点：需要协调 `RotatingFileHandler` 的文件描述符偏移。
+        - 先 acquire/flush/close handler 的 stream
+        - 原地重写 + truncate（避免 handler 写入旧 inode）
+        - 再 reopen，保证后续写入正常 append
+        """
+        handler = getattr(self, '_file_handler', None)
+        if handler is None:
+            return
+
+        log_file = getattr(handler, 'baseFilename', None)
+        if not log_file or not os.path.exists(log_file):
+            return
+
+        max_lines = int(getattr(self, '_log_trim_max_lines', 30000))
+        trim_head = int(getattr(self, '_log_trim_head_lines', 25000))
+        if max_lines <= 0 or trim_head <= 0:
+            return
+
+        # 快速统计行数（大文件仍是 O(n)，但 3w 级别通常可接受）
+        try:
+            with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                total_lines = sum(1 for _ in f)
+        except Exception:
+            return
+
+        if total_lines <= max_lines:
+            return
+
+        keep_lines = max(0, total_lines - trim_head)
+        # 防止极端情况把文件清空导致日志不可读
+        if keep_lines == 0:
+            keep_lines = min(total_lines, max_lines)
+
+        handler.acquire()
+        try:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+
+            # 关闭当前 stream，避免 trim 后偏移不一致造成“文件空洞”
+            try:
+                if getattr(handler, 'stream', None):
+                    handler.stream.close()
+            except Exception:
+                pass
+            handler.stream = None
+
+            # 读取末尾 keep_lines 行并原地重写
+            tail = deque(maxlen=keep_lines)
+            with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    tail.append(line)
+
+            with open(log_file, 'w', encoding='utf-8') as f:
+                f.writelines(tail)
+
+            # 重新打开 stream
+            try:
+                handler.stream = handler._open()
+            except Exception:
+                # 失败也不影响主流程
+                handler.stream = None
+        finally:
+            handler.release()
     
     def _init_monitors(self) -> Dict[str, Any]:
         """
@@ -243,6 +319,8 @@ class PriceMonitor:
         
         try:
             while not _should_exit:
+                # 每轮开始前做一次日志裁剪，避免长期运行把磁盘/内存拖垮
+                self._trim_log_file_if_needed()
                 self.logger.info("-" * 50)
                 self.logger.info(f"开始新一轮监控 - {time.strftime('%Y-%m-%d %H:%M:%S')}")
                 self.logger.info("-" * 50)

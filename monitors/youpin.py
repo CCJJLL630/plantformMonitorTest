@@ -344,94 +344,147 @@ class YoupinMonitor(PlatformMonitor):
             # 直接使用 API 多页拉取
             self.logger.info(f"开始获取市场在售商品: {item_name} (templateId={template_id})")
 
-            # 收集多页数据（从配置读取最大页数，默认2页确保获取前80个商品）
-            all_items = []
-            pages_fetched = 0
-            max_pages = int(self.config.get('max_pages', 2))  # 默认2页x50=100个商品
-            page_delay = float(self.config.get('market_page_delay_seconds', 2.0))
-            for page in range(1, max_pages + 1):
-                self.logger.info(f"获取第 {page} 页数据... (API)")
+            # 分页参数（支持单品覆盖 + 平台默认）
+            # 说明：默认仍为 2 页（约 100 条），避免请求过多触发风控。
+            page_size = 50
+            if item_config and item_config.get('youpin_page_size'):
+                try:
+                    page_size = int(item_config.get('youpin_page_size'))
+                except Exception:
+                    page_size = 50
+            if self.config.get('page_size'):
+                try:
+                    page_size = int(self.config.get('page_size'))
+                except Exception:
+                    pass
+            page_size = max(1, min(page_size, 100))
 
-                items = self._fetch_market_data(template_id, page, 50)
+            base_max_pages = int(self.config.get('max_pages', 2))
+            if item_config and item_config.get('youpin_max_pages') is not None:
+                try:
+                    base_max_pages = int(item_config.get('youpin_max_pages'))
+                except Exception:
+                    pass
+            base_max_pages = max(1, base_max_pages)
+
+            extra_pages_on_no_hit = int(self.config.get('extra_pages_on_no_hit', 0))
+            if item_config and item_config.get('youpin_extra_pages_on_no_hit') is not None:
+                try:
+                    extra_pages_on_no_hit = int(item_config.get('youpin_extra_pages_on_no_hit'))
+                except Exception:
+                    pass
+            extra_pages_on_no_hit = max(0, extra_pages_on_no_hit)
+
+            hard_max_pages = base_max_pages
+            if extra_pages_on_no_hit > 0:
+                hard_max_pages = base_max_pages + extra_pages_on_no_hit
+            if self.config.get('hard_max_pages') is not None:
+                try:
+                    hard_max_pages = int(self.config.get('hard_max_pages'))
+                except Exception:
+                    pass
+            if item_config and item_config.get('youpin_hard_max_pages') is not None:
+                try:
+                    hard_max_pages = int(item_config.get('youpin_hard_max_pages'))
+                except Exception:
+                    pass
+            hard_max_pages = max(base_max_pages, hard_max_pages)
+
+            page_delay = float(self.config.get('market_page_delay_seconds', 2.0))
+
+            expected = self._normalize_name(item_name)
+            filtered: List[Dict[str, Any]] = []
+            pages_fetched = 0
+            total_items = 0
+            effective_max_pages = base_max_pages
+
+            self.logger.info(
+                f"Youpin 分页参数: pageSize={page_size} baseMaxPages={base_max_pages} extraOnNoHit={extra_pages_on_no_hit} hardMaxPages={hard_max_pages}"
+            )
+
+            page = 1
+            while page <= effective_max_pages:
+                self.logger.info(f"获取第 {page} 页数据... (API)")
+                items = self._fetch_market_data(template_id, page, page_size)
                 if not items:
                     self.logger.warning(f"第 {page} 页无数据或请求失败，停止")
                     break
 
                 pages_fetched += 1
-                all_items.extend(items)
+                total_items += len(items)
 
-                # 翻页间隔：降低触发 429/84104 的概率，增加随机性
-                if page_delay > 0 and page < max_pages:
-                    # 增加10-30%的随机延迟，避免固定间隔被识别
-                    jitter = random.uniform(0.1, 0.3)
-                    actual_delay = page_delay * (1 + jitter)
-                    self.logger.debug(f"等待 {actual_delay:.2f} 秒后请求下一页...")
-                    time.sleep(actual_delay)
-                
-                # 输出本页磨损范围和每个商品的详细信息
+                # 输出本页磨损范围（便于判断是否需要多翻页）
                 wears_in_page = []
                 prices_in_page = []
+                hits_in_page = 0
                 for item in items:
                     abrade_raw = item.get('abrade') or item.get('Abrade') or item.get('wear') or item.get('Wear')
                     price_raw = item.get('price') or item.get('Price') or item.get('sellingPrice') or item.get('SellingPrice')
                     commodity_name = item.get('commodityName') or item.get('CommodityName') or item.get('name') or item.get('goods_name') or ''
+
+                    # 名称过滤（先做，减少无关解析）
+                    if expected != self._normalize_name(commodity_name):
+                        continue
+
                     try:
                         wear = float(abrade_raw)
                         if wear > 1:
                             wear = wear / 100.0
                         price = float(price_raw)
-                        wears_in_page.append(wear)
-                        prices_in_page.append(price)
-                        # 打印每个商品的详细信息
-                        self.logger.debug(f"  [{page}页] {commodity_name[:20]}... 价格:{price} 磨损:{wear:.4f}")
                     except Exception:
-                        pass
-                
+                        continue
+
+                    wears_in_page.append(wear)
+                    prices_in_page.append(price)
+                    self.logger.debug(f"  [{page}页] {commodity_name[:20]}... 价格:{price} 磨损:{wear:.4f}")
+
+                    if wear_min <= wear <= wear_max:
+                        hits_in_page += 1
+                        filtered.append({
+                            'platform': 'youpin',
+                            'item_name': item_name,
+                            'price': price,
+                            'wear': wear,
+                            'url': f'https://www.youpin898.com/market/goods-list?templateId={template_id}',
+                            'timestamp': int(time.time()),
+                            'id': item.get('id') or item.get('Id'),
+                        })
+
                 if wears_in_page:
                     min_wear = min(wears_in_page)
                     max_wear = max(wears_in_page)
                     min_price = min(prices_in_page)
                     max_price = max(prices_in_page)
-                    self.logger.info(f"第 {page} 页: {len(items)}个商品 | 磨损: {min_wear:.4f}~{max_wear:.4f} | 价格: ¥{min_price:.2f}~¥{max_price:.2f}")
+                    self.logger.info(
+                        f"第 {page} 页: {len(items)}个商品 | 磨损: {min_wear:.4f}~{max_wear:.4f} | 价格: ¥{min_price:.2f}~¥{max_price:.2f} | 区间命中: {hits_in_page}"
+                    )
                 else:
                     self.logger.info(f"第 {page} 页获取到 {len(items)} 个商品")
 
-            self.logger.info(f"共获取 {len(all_items)} 个在售商品（{pages_fetched}/{max_pages} 页）")
-            
-            # 过滤和排序
-            expected = self._normalize_name(item_name)
-            filtered = []
-            
-            for item in all_items:
-                commodity_name = item.get('commodityName') or item.get('CommodityName') or item.get('name') or item.get('goods_name') or ''
-                actual = self._normalize_name(commodity_name)
-                
-                if expected != actual:
-                    continue
-                
-                # 解析价格和磨损
-                price_raw = item.get('price') or item.get('Price') or item.get('sellingPrice') or item.get('SellingPrice') or 0
-                abrade_raw = item.get('abrade') or item.get('Abrade') or item.get('wear') or item.get('Wear') or 0
-                
-                try:
-                    price = float(price_raw)
-                    wear = float(abrade_raw)
-                    if wear > 1:
-                        wear = wear / 100.0
-                except (ValueError, TypeError):
-                    continue
-                
-                # 磨损区间过滤
-                if wear_min <= wear <= wear_max:
-                    filtered.append({
-                        'platform': 'youpin',
-                        'item_name': item_name,
-                        'price': price,
-                        'wear': wear,
-                        'url': f'https://www.youpin898.com/market/goods-list?templateId={template_id}',
-                        'timestamp': int(time.time()),
-                        'id': item.get('id') or item.get('Id'),
-                    })
+                # 若扫完基础页数仍 0 命中，则按配置自动加页
+                if (
+                    page == base_max_pages
+                    and len(filtered) == 0
+                    and extra_pages_on_no_hit > 0
+                    and effective_max_pages < hard_max_pages
+                ):
+                    new_max = min(hard_max_pages, base_max_pages + extra_pages_on_no_hit)
+                    if new_max > effective_max_pages:
+                        effective_max_pages = new_max
+                        self.logger.info(
+                            f"磨损区间 {wear_min}-{wear_max} 前{base_max_pages}页命中为0，自动扩展抓取到 {effective_max_pages} 页"
+                        )
+
+                # 翻页间隔：降低触发 429/85100 的概率，增加随机性
+                if page_delay > 0 and page < effective_max_pages:
+                    jitter = random.uniform(0.1, 0.3)
+                    actual_delay = page_delay * (1 + jitter)
+                    self.logger.debug(f"等待 {actual_delay:.2f} 秒后请求下一页...")
+                    time.sleep(actual_delay)
+
+                page += 1
+
+            self.logger.info(f"共获取 {total_items} 个在售商品（{pages_fetched}/{effective_max_pages} 页）")
             
             # 按价格升序排序，取前20个
             filtered.sort(key=lambda x: x['price'])

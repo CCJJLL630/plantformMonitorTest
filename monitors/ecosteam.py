@@ -2,11 +2,232 @@
 from typing import Dict, List, Any, Optional
 import re
 import time
+import random
+from urllib.parse import urlparse
 from .base import PlatformMonitor
 
 
 class EcosteamMonitor(PlatformMonitor):
     """ECOSteam平台监控器（API 优先，HTML 作为备用）"""
+
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+
+        # Add a few browser-like defaults (do not overwrite user-provided headers).
+        self.session.headers.setdefault(
+            'Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        )
+        self.session.headers.setdefault('Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8')
+
+        # Simple per-instance rate limiter for ecosteam requests.
+        self._ecosteam_last_request_ts = 0.0
+
+    def _throttle(self) -> None:
+        """Throttle ECOSteam requests to lower anti-bot probability.
+
+        Config knobs (optional):
+        - request_min_interval_seconds: minimum interval between requests (default 0.9)
+        - request_jitter_seconds: additional random jitter (default 0.6)
+        """
+
+        min_interval = float(self.config.get('request_min_interval_seconds', 0.9))
+        jitter = float(self.config.get('request_jitter_seconds', 0.6))
+
+        now = time.monotonic()
+        last = getattr(self, '_ecosteam_last_request_ts', 0.0) or 0.0
+        elapsed = now - last
+
+        base_sleep = max(0.0, min_interval - elapsed)
+        # Add jitter even if base_sleep==0 to avoid an obvious pattern.
+        extra = random.uniform(0.05, max(0.05, jitter))
+        time.sleep(base_sleep + extra)
+        self._ecosteam_last_request_ts = time.monotonic()
+
+    def _request(self, url: str, method: str = 'GET', *, referer: Optional[str] = None, timeout: float = 20.0, **kwargs):
+        """ECOSteam-specific request wrapper with throttling."""
+        self._throttle()
+
+        headers = dict(kwargs.pop('headers', {}) or {})
+        if referer:
+            headers.setdefault('Referer', referer)
+        # Keep the header minimal; session already has UA/Accept defaults.
+        kwargs['headers'] = headers
+
+        if self.proxies and 'proxies' not in kwargs:
+            kwargs['proxies'] = self.proxies
+
+        return self.session.request(method, url, timeout=timeout, **kwargs)
+
+    def _try_bypass_acw_sc_v2(self, url: str, html: str) -> Optional[str]:
+        """尝试绕过 ECOSteam 的 acw_sc__v2 JS Challenge。
+
+        若命中挑战页，会在 session.cookies 中写入 acw_sc__v2，然后重试 GET。
+        返回重试后的 HTML；如果未命中或解算失败则返回 None。
+        """
+
+        if not html:
+            return None
+
+        # Typical challenge page includes arg1 and sets document.cookie='acw_sc__v2=...'; then reload.
+        if "acw_sc__v2" not in html or "var arg1=" not in html or "document" not in html:
+            return None
+
+        try:
+            m_arg1 = re.search(r"var\s+arg1\s*=\s*'([0-9A-Fa-f]+)'", html)
+            if not m_arg1:
+                return None
+            arg1 = m_arg1.group(1)
+
+            # Extract permutation list m=[0xf,0x23,...]
+            m_m = re.search(r"\bm\s*=\s*\[([^\]]+)\]", html)
+            if not m_m:
+                return None
+            m_tokens = re.findall(r"0x[0-9A-Fa-f]+|\d+", m_m.group(1))
+            if not m_tokens:
+                return None
+            perm = [int(t, 16) if t.lower().startswith("0x") else int(t) for t in m_tokens]
+
+            # Extract obfuscated string array N=['...','...'] from function a0i().
+            # NOTE: This array is rotated by a self-invoking loop before being used.
+            m_n = re.search(r"var\s+N\s*=\s*\[([\s\S]*?)\]", html)
+            if not m_n:
+                return None
+            table = re.findall(r"'([^']*)'", m_n.group(1))
+            if len(table) < 30:
+                return None
+
+            def _custom_b64_decode(s: str) -> str:
+                """Decode using the same obfuscated routine embedded in the challenge page.
+
+                It is effectively a base64 decoder but with a custom alphabet ordering.
+                """
+
+                alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/="
+                out = bytearray()
+                q = 0
+                r = 0
+
+                for ch in s:
+                    idx = alphabet.find(ch)
+                    if idx < 0:
+                        continue
+                    if idx == 64:
+                        # '=' padding
+                        break
+
+                    # JS: r = q%4 ? r*0x40 + s : s
+                    if q % 4:
+                        r = r * 64 + idx
+                    else:
+                        r = idx
+
+                    # JS uses q++%4 in condition, so output happens when old_q%4 != 0
+                    old_q = q
+                    q += 1
+                    if old_q % 4 == 0:
+                        continue
+
+                    # JS: 0xff & (r >> ((-2*q) & 6))
+                    shift = ((-2 * q) & 6)
+                    out.append((r >> shift) & 0xFF)
+
+                try:
+                    return bytes(out).decode("utf-8", errors="ignore")
+                except Exception:
+                    return ""
+
+            def _parse_int_js(s: str) -> int:
+                # Emulate JS parseInt(s) (base10, stops at first non-digit)
+                m = re.match(r"\s*([+-]?\d+)", str(s))
+                if not m:
+                    raise ValueError(f"parseInt failed: {s!r}")
+                return int(m.group(1))
+
+            def _a0j(idx_hex: int) -> str:
+                # Mirror: idx = idx_hex - 0xfb
+                i = idx_hex - 0xFB
+                if i < 0 or i >= len(table):
+                    return ""
+                val = table[i]
+                # Cache decoded strings back into the table
+                if isinstance(val, str) and val and not val.startswith("__decoded__:"):
+                    decoded = _custom_b64_decode(val)
+                    table[i] = "__decoded__:" + decoded
+                    return decoded
+                if isinstance(val, str) and val.startswith("__decoded__:"):
+                    return val[len("__decoded__:") :]
+                return str(val)
+
+            # The challenge script rotates the table until a numeric expression matches 0x760bf.
+            # We replicate that exact loop to align indices.
+            target = 0x760BF
+            for _ in range(len(table) + 5):
+                try:
+                    e = (
+                        -_parse_int_js(_a0j(0x117)) / 0x1 * (_parse_int_js(_a0j(0x111)) / 0x2)
+                        + -_parse_int_js(_a0j(0x0FB)) / 0x3 * (_parse_int_js(_a0j(0x10E)) / 0x4)
+                        + -_parse_int_js(_a0j(0x101)) / 0x5 * (-_parse_int_js(_a0j(0x0FD)) / 0x6)
+                        + -_parse_int_js(_a0j(0x102)) / 0x7 * (_parse_int_js(_a0j(0x122)) / 0x8)
+                        + _parse_int_js(_a0j(0x112)) / 0x9
+                        + _parse_int_js(_a0j(0x11D)) / 0xA * (_parse_int_js(_a0j(0x11C)) / 0xB)
+                        + _parse_int_js(_a0j(0x114)) / 0xC
+                    )
+                    # allow float rounding differences
+                    if int(e) == target:
+                        break
+                    table.append(table.pop(0))
+                except Exception:
+                    table.append(table.pop(0))
+
+            p = str(_a0j(0x115))
+            p_hex = re.sub(r"[^0-9A-Fa-f]", "", p)
+            # p should be a non-trivial hex string used as XOR key
+            if len(p_hex) < 20:
+                return None
+
+            # Build u by permuting arg1 according to perm (1-based indices in perm)
+            q_chars: List[str] = [""] * len(perm)
+            for i, ch in enumerate(arg1):
+                one_based = i + 1
+                for j, idx in enumerate(perm):
+                    if idx == one_based:
+                        q_chars[j] = ch
+            u = "".join(q_chars)
+
+            # XOR u and p (hex pairs)
+            max_len = min(len(u), len(p_hex))
+            max_len -= max_len % 2
+            v = []
+            for i in range(0, max_len, 2):
+                a = int(u[i : i + 2], 16)
+                b = int(p_hex[i : i + 2], 16)
+                v.append(f"{a ^ b:02x}")
+            cookie_value = "".join(v)
+            if not cookie_value:
+                return None
+
+            # Set cookie to session for ecosteam domain, then retry.
+            host = ""
+            try:
+                host = urlparse(self.base_url).hostname or ""
+            except Exception:
+                host = ""
+            if host:
+                self.session.cookies.set("acw_sc__v2", cookie_value, domain=host)
+            else:
+                self.session.cookies.set("acw_sc__v2", cookie_value)
+
+            self.logger.warning("ECOSteam 命中 acw_sc__v2 反爬挑战页，已自动解算并重试请求")
+
+            # Backoff a bit before retrying, to look more human.
+            backoff = float(self.config.get('challenge_backoff_seconds', 2.0))
+            time.sleep(backoff + random.uniform(0.0, 1.0))
+
+            resp2 = self._request(url, referer=url)
+            return resp2.text
+        except Exception as e:
+            self.logger.warning(f"ECOSteam 可能命中反爬挑战页，但自动解算失败: {e}")
+            return None
 
     def _get_goods_detail_url(self, item_config: Optional[Dict[str, Any]]) -> Optional[str]:
         if item_config:
@@ -61,8 +282,17 @@ class EcosteamMonitor(PlatformMonitor):
 
             return rows
 
-        response = self._make_request(goods_url)
-        html1 = response.text
+        # Fetch page 1 with throttling + challenge handling.
+        resp1 = self._request(goods_url, referer=goods_url)
+        html1 = resp1.text
+
+        # Some challenges may require 1-2 rounds (cookie set then reload).
+        max_challenge_retries = int(self.config.get('challenge_max_retries', 2))
+        for _ in range(max(0, max_challenge_retries)):
+            bypassed = self._try_bypass_acw_sc_v2(goods_url, html1)
+            if bypassed is None:
+                break
+            html1 = bypassed
         max_page_on_site = _detect_max_page(html1)
 
         all_rows: List[Dict[str, float]] = []
@@ -74,23 +304,42 @@ class EcosteamMonitor(PlatformMonitor):
             wears = [r['wear'] for r in page1_rows]
             self.logger.info(f"ECOSteam 第1页：{len(page1_rows)}个商品，磨损范围 {min(wears):.6f}-{max(wears):.6f}")
 
-        # 从配置读取最大页数，默认20页
+        # 从配置读取最大页数，默认20页；允许每个商品配置覆盖（减少请求量）
         config_max_pages = int(self.config.get('max_pages', 20))
+        item_max_pages = None
+        try:
+            # item_config is not directly passed here; allow per-url mapping via config if needed.
+            # (Kept for future extension)
+            pass
+        except Exception:
+            item_max_pages = None
+
         actual_max_page = min(max_page_on_site, config_max_pages)
         page_delay = float(self.config.get('page_delay_seconds', 1.0))
         
+        if max_page_on_site == 1 and not page1_rows:
+            # 极大概率是结构变更或被拦截（挑战页/登录页等）
+            if "acw_sc__v2" in html1 or "acw_sc" in html1:
+                self.logger.warning("ECOSteam 解析到 0 商品且页数为 1：疑似仍被反爬拦截（acw_sc__v2）")
+            else:
+                self.logger.warning("ECOSteam 解析到 0 商品且页数为 1：可能页面结构变更或需要登录/验证码")
+
         self.logger.info(f"ECOSteam 网站共{max_page_on_site}页，将抓取前{actual_max_page}页")
 
         # 抓取后续页面
         for page in range(2, actual_max_page + 1):
-            # 添加随机延迟，避免触发反爬
+            # 添加随机延迟，避免触发反爬（同时 _request 内也有节流）
             if page_delay > 0:
-                jitter = random.uniform(0.1, 0.3)
+                jitter = random.uniform(0.10, 0.45)
                 actual_delay = page_delay * (1 + jitter)
                 time.sleep(actual_delay)
             
             url = _page_url(goods_url, page)
-            page_html = self._make_request(url).text
+            page_html = self._request(url, referer=goods_url).text
+            # Handle challenge page on subsequent pages too
+            bypassed = self._try_bypass_acw_sc_v2(url, page_html)
+            if bypassed is not None:
+                page_html = bypassed
             page_rows = _parse_rows(page_html)
             all_rows.extend(page_rows)
             
@@ -214,7 +463,7 @@ class EcosteamMonitor(PlatformMonitor):
         wear_max: float,
         item_config: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """获取ECOSteam平台商品价格（API 优先，失败则回退 HTML）"""
+        """获取ECOSteam平台商品价格（仅使用 HTML 解析）。"""
         results: List[Dict[str, Any]] = []
         observed_wears: List[float] = []
 
@@ -224,79 +473,56 @@ class EcosteamMonitor(PlatformMonitor):
                 self.logger.error('ECOSteam 缺少 goods_detail_url（商品详情页 URL）')
                 return results
 
-            # 准备请求头
-            self.session.headers.setdefault('Origin', self.base_url.rstrip('/'))
-            self.session.headers.setdefault('Referer', goods_url)
-            self.session.headers.setdefault('X-Requested-With', 'XMLHttpRequest')
-
-            # 解析 gameId
-            parsed = self._parse_goods_url(goods_url)
-            game_id = int(item_config.get('eco_game_id') or parsed.get('gameId') or 730)
-
-            # 先尝试 API
-            hash_name = self._resolve_hash_name(goods_url, item_config)
-            internal_id = None
-            if hash_name:
-                internal_id = item_config.get('eco_internal_goods_id') or item_config.get('eco_goods_id')
-                internal_id = str(internal_id) if internal_id else self._resolve_internal_id(hash_name, game_id)
-
-            api_items: List[Dict[str, Any]] = []
-            if hash_name:
-                self.logger.info(f"通过 API 获取 ECOSteam 在售列表: hash_name={hash_name} internal_id={internal_id}")
-                api_items = self._fetch_sell_list_api(hash_name, internal_id, game_id)
+            # Per-item max pages override to reduce requests when monitoring many items.
+            # Example in config item: "ecosteam_max_pages": 3
+            if item_config and item_config.get('ecosteam_max_pages') is not None:
+                try:
+                    per_item_pages = int(item_config.get('ecosteam_max_pages'))
+                    if per_item_pages > 0:
+                        # Temporarily clamp for this call
+                        old = self.config.get('max_pages')
+                        self.config['max_pages'] = min(int(self.config.get('max_pages', 20)), per_item_pages)
+                    else:
+                        old = None
+                except Exception:
+                    old = None
             else:
-                self.logger.warning("未获取到 hash_name，跳过 API，回退 HTML 解析")
+                old = None
 
-            # 如果 API 返回为空，回退到 HTML 解析
-            if not api_items:
-                self.logger.info("API 未返回数据，改用 HTML 解析")
-                for row in self._parse_sell_list_from_html(goods_url):
-                    wear_value = float(row.get('wear', 0))
-                    price = float(row.get('price', 0))
+            # 仅使用 HTML 解析在售列表
+            for row in self._parse_sell_list_from_html(goods_url):
+                wear_value = float(row.get('wear', 0))
+                price = float(row.get('price', 0))
 
-                    if len(observed_wears) < 30:
-                        observed_wears.append(wear_value)
+                if len(observed_wears) < 30:
+                    observed_wears.append(wear_value)
 
-                    if wear_min <= wear_value <= wear_max:
-                        results.append({
-                            'platform': 'ecosteam',
-                            'item_name': item_name,
-                            'price': price,
-                            'wear': wear_value,
-                            'url': goods_url,
-                            'timestamp': int(time.time())
-                        })
-                        self.logger.info(
-                            f"找到匹配商品 - 价格: {price}, 磨损: {wear_value:.6f}"
-                        )
-            else:
-                # 使用 API 数据
-                for item in api_items:
-                    wear_value = self._parse_wear(item)
-                    price = self._parse_price(item)
-                    if wear_value is None or price is None:
-                        continue
+                if wear_min <= wear_value <= wear_max:
+                    results.append({
+                        'platform': 'ecosteam',
+                        'item_name': item_name,
+                        'price': price,
+                        'wear': wear_value,
+                        'url': goods_url,
+                        'timestamp': int(time.time())
+                    })
 
-                    if len(observed_wears) < 30:
-                        observed_wears.append(wear_value)
-
-                    if wear_min <= wear_value <= wear_max:
-                        results.append({
-                            'platform': 'ecosteam',
-                            'item_name': item_name,
-                            'price': price,
-                            'wear': wear_value,
-                            'url': goods_url,
-                            'timestamp': int(time.time())
-                        })
-                        self.logger.info(
-                            f"找到匹配商品 - 价格: {price}, 磨损: {wear_value:.6f}"
-                        )
+            # 只需要“磨损区间内的数据”，然后按价格升序排列（不再按磨损参与排序）
+            if results:
+                results.sort(key=lambda x: (x.get('price', float('inf'))))
+                for r in results:
+                    self.logger.info(
+                        f"找到匹配商品 - 价格: {r.get('price')}, 磨损: {float(r.get('wear', 0)):.6f}"
+                    )
 
             if not results and observed_wears:
                 self.logger.info(
                     f"ECOSteam 未命中磨损区间: {wear_min}-{wear_max}；样本磨损范围: {min(observed_wears):.6f}-{max(observed_wears):.6f}"
                 )
+
+            if old is not None:
+                # restore
+                self.config['max_pages'] = old
 
         except Exception as e:
             self.logger.error(f"获取ECOSteam价格失败: {e}")
