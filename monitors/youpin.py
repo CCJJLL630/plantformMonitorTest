@@ -18,6 +18,42 @@ class YoupinMonitor(PlatformMonitor):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.logger = logging.getLogger('YoupinMonitor')
+        self._blocked_until_ts: float = 0.0
+
+    def _now(self) -> float:
+        return time.time()
+
+    def _set_block_cooldown(self, reason: str) -> None:
+        cooldown_s = float(self.config.get('market_block_cooldown_seconds', 1800))
+        if cooldown_s <= 0:
+            return
+        until = self._now() + cooldown_s
+        # 只延长不缩短
+        if until > self._blocked_until_ts:
+            self._blocked_until_ts = until
+        self.logger.warning(
+            f"Youpin 触发拦截/风控，进入冷却 {int(cooldown_s)}s（到 {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self._blocked_until_ts))}）。"
+            f"原因: {reason}。建议：用浏览器登录后抓包更新 config.json 的 platforms.youpin.market_headers（尤其 authorization/deviceid/uk/deviceuk）和 Cookie(uu_token)，并适当加大延迟。"
+        )
+
+    def _in_block_cooldown(self) -> bool:
+        return self._now() < float(self._blocked_until_ts or 0.0)
+
+    def _is_likely_blocked_response(self, resp) -> bool:
+        try:
+            if resp.status_code in (401, 403, 405, 429):
+                return True
+            ct = (resp.headers.get('content-type') or '').lower()
+            # 正常接口应为 json；如果是 html/plain 且看起来像拦截页，也视为被挡
+            if 'application/json' not in ct:
+                body = (resp.text or '').strip().lower()
+                if body.startswith('<!doctype') or body.startswith('<html') or '<meta' in body[:400]:
+                    return True
+                if 'captcha' in body[:800] or '验证' in body[:800] or '风控' in body[:800]:
+                    return True
+            return False
+        except Exception:
+            return False
 
     def _normalize_name(self, name: str) -> str:
         # 归一化：去空白与常见分隔符，并去掉磨损括号部分，降低中英文标点差异影响
@@ -50,10 +86,22 @@ class YoupinMonitor(PlatformMonitor):
 
     def _ensure_token_headers(self, referer: Optional[str]):
         """确保请求头包含必要的 Cookie/Token 与移动端 UA"""
-        cookie = self.session.headers.get('Cookie', '')
-        m = re.search(r'(?:^|;\s*)uu_token=([^;]+)', cookie)
-        if m:
-            token = m.group(1)
+        token = None
+
+        # 优先从 cookie jar 里拿（PlatformMonitor 会把 config 里的 Cookie 写入这里）
+        try:
+            token = self.session.cookies.get('uu_token')
+        except Exception:
+            token = None
+
+        # 兼容部分场景：用户把 Cookie 写进了 headers（不推荐，但可能存在）
+        if not token:
+            cookie = self.session.headers.get('Cookie', '')
+            m = re.search(r'(?:^|;\s*)uu_token=([^;]+)', cookie)
+            if m:
+                token = m.group(1)
+
+        if token:
             # 同时尝试多个头以兼容不同的后端校验
             self.session.headers.setdefault('uu-token', token)
             self.session.headers.setdefault('UU-Token', token)
@@ -178,6 +226,10 @@ class YoupinMonitor(PlatformMonitor):
         referer = self._get_goods_list_url() or f'https://www.youpin898.com/market/goods-list?templateId={template_id}&gameId=730&listType=10'
         self._ensure_token_headers(referer)
 
+        if self._in_block_cooldown():
+            self.logger.warning("Youpin 仍在冷却期内，跳过本次请求（避免加重风控）")
+            return None
+
         info = {
             'templateId': int(template_id),
             'gameId': int(self.config.get('game_id', 730)),
@@ -250,18 +302,10 @@ class YoupinMonitor(PlatformMonitor):
                         params=payload if method == 'GET' else None,
                     )
 
-                    # 403 基本是风控/权限，继续狂试只会更糟
-                    if resp.status_code == 403:
+                    if self._is_likely_blocked_response(resp):
                         self._log_http_block(url, resp)
+                        self._set_block_cooldown(f"HTTP {resp.status_code} / content-type={resp.headers.get('content-type', '')}")
                         return None
-
-                    # 429：做退避再尝试下一次（避免瞬间触发更严格限制）
-                    if resp.status_code == 429:
-                        self._log_http_block(url, resp)
-                        sleep_s = min(backoff_cap, backoff_base * (2 ** (tried - 1)))
-                        sleep_s = sleep_s * (0.85 + random.random() * 0.3)  # jitter
-                        time.sleep(sleep_s)
-                        continue
 
                     if resp.status_code != 200:
                         # 其他状态：记录片段并继续

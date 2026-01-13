@@ -1,6 +1,4 @@
-{sudo systemctl restart plantform-monitor.service
-    
-    
+{
     "monitor_interval": 300,
     "platforms": {
         "buff": {
@@ -14,8 +12,9 @@
             "goods_list_url": "https://www.youpin898.com/market/goods-list?listType=10&templateId=109545&gameId=730",
             "cookie": "uu_token=YOUR_TOKEN; other=...",  
             "market_api_url": "https://api.youpin898.com/api/homepage/pc/goods/market/queryOnSaleCommodityList",  
-            "market_api_path": "" ,
+            "market_api_path": "",
             "market_method": "POST",
+            "market_block_cooldown_seconds": 1800,
             "market_headers": {},
             "game_id": 730,
             "list_type": 10,

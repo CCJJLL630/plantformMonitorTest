@@ -49,6 +49,14 @@ class PlatformMonitor(ABC):
             host = ''
 
         parts = [p.strip() for p in cookie.split(';') if p.strip()]
+        cookie_domains = []
+        if host:
+            cookie_domains.append(host)
+            # 兼容很多站点把业务放在不同子域名（如 api.example.com），
+            # 仅设置到 www 子域会导致请求 API 子域时不携带 Cookie。
+            if host.startswith('www.') and len(host) > 4:
+                cookie_domains.append(host[4:])
+
         for part in parts:
             if '=' not in part:
                 continue
@@ -57,8 +65,9 @@ class PlatformMonitor(ABC):
             value = value.strip()
             if not name:
                 continue
-            if host:
-                self.session.cookies.set(name, value, domain=host)
+            if cookie_domains:
+                for d in cookie_domains:
+                    self.session.cookies.set(name, value, domain=d)
             else:
                 self.session.cookies.set(name, value)
     

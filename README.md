@@ -149,6 +149,7 @@ Copy-Item config.json.example config.json
     "api_base_url": "https://api.youpin898.com",
     "market_api_url": "https://api.youpin898.com/api/homepage/pc/goods/market/queryOnSaleCommodityList",
     "market_method": "POST",
+    "market_block_cooldown_seconds": 1800,
     "market_page_delay_seconds": 1.0,
     "market_request_delay_seconds": 0.25,
     "market_headers": {
@@ -170,6 +171,40 @@ Copy-Item config.json.example config.json
     "Cookie": "uu_token=<uu_token>"
 }
 ```
+
+### 为什么需要更新 Youpin 的 Cookie/uu_token？
+
+Youpin 的 `uu_token`/相关 Cookie 并不是“长期固定可用”的凭证，常见会失效或被风控的原因包括：
+
+- **过期**：`uu_token` 类似 JWT，会有 `exp` 过期时间，到期后必然不可用。
+- **风控绑定**：服务端可能把 token 与设备信息（`deviceid/uk/deviceuk`）、IP、UA、请求频率等绑定；其中任意变化都可能触发 403/拦截页。
+- **被拉黑/需要验证**：一旦触发反爬，接口可能返回 HTML 的拦截页（日志里常见 `status=403`，响应体片段是 `<!doctype html>...`），这时继续重试只会更糟。
+
+因此：即使你“现在配置里还有 uu_token”，它也可能已经过期，或已经被风控策略判定为需要重新验证；最稳妥的恢复方式就是**按正常流程登录后重新抓包更新**。
+
+### Youpin 403/拦截页排障
+
+当日志出现类似：
+
+- `Youpin 请求被拦截: status=403 ...`
+- 响应体片段里是 HTML（`<!doctype html>` / `<html ...>`）
+
+建议按以下步骤处理：
+
+1. **浏览器登录** https://www.youpin898.com
+2. F12 → Network，找到 `queryOnSaleCommodityList` 请求
+3. 把该请求的 Request Headers 中字段同步到 `platforms.youpin.market_headers`
+   - 重点：`authorization`、`deviceid`、`uk`、`deviceuk`、`app-version/appversion`、`secret-v`、`platform`、`user-agent`、`referer/origin`
+4. 同步 Cookie 中的 `uu_token` 到 `platforms.youpin.Cookie`
+5. 若仍易触发限制：增大 `market_page_delay_seconds` / `market_request_delay_seconds`
+
+### 冷却机制（避免加重风控）
+
+新增参数：
+
+- `market_block_cooldown_seconds`：当检测到 403/429/拦截页时，进入冷却期（默认 1800 秒），冷却期内会跳过 Youpin 请求，避免继续触发更严格的风控。
+
+你可以根据自己的稳定性需求，把它调大到 3600 或更高。
 
 获取 Youpin 的 `market_headers`：
 1. 浏览器登录并打开首页/商品列表页
